@@ -273,7 +273,7 @@ def render_band_table(stats: list[dict]) -> None:
 
 # ── Plotly charts ──────────────────────────────────────────────────────────────
 
-_CHART_LAYOUT = dict(
+_CHART_BASE = dict(
     height=400,
     margin=dict(t=20, b=40, l=60, r=20),
     hovermode="x unified",
@@ -281,8 +281,9 @@ _CHART_LAYOUT = dict(
     paper_bgcolor="rgba(0,0,0,0)",
     legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="left", x=0),
     xaxis=dict(showgrid=False, showline=True, linecolor="#e5e7eb"),
-    yaxis=dict(showgrid=True, gridcolor="#f0f0f0", showline=False, zeroline=True, zerolinecolor="#e5e7eb"),
 )
+
+_YAXIS_BASE = dict(showgrid=True, gridcolor="#f0f0f0", showline=False, zeroline=True, zerolinecolor="#e5e7eb")
 
 
 def render_frequency_chart(freq_df: pd.DataFrame) -> None:
@@ -297,8 +298,8 @@ def render_frequency_chart(freq_df: pd.DataFrame) -> None:
             mode="lines+markers", marker=dict(size=4),
         ))
     fig.update_layout(
-        **_CHART_LAYOUT,
-        yaxis=dict(**_CHART_LAYOUT["yaxis"], title="% of Hours", ticksuffix="%", rangemode="tozero"),
+        **_CHART_BASE,
+        yaxis=dict(**_YAXIS_BASE, title="% of Hours", ticksuffix="%", rangemode="tozero"),
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -315,8 +316,8 @@ def render_avg_price_chart(avg_df: pd.DataFrame) -> None:
             mode="lines+markers", marker=dict(size=4),
         ))
     fig.update_layout(
-        **_CHART_LAYOUT,
-        yaxis=dict(**_CHART_LAYOUT["yaxis"], title="Avg Price ($/MWh)", tickprefix="$"),
+        **_CHART_BASE,
+        yaxis=dict(**_YAXIS_BASE, title="Avg Price ($/MWh)", tickprefix="$"),
     )
     st.plotly_chart(fig, use_container_width=True)
 
