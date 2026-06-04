@@ -1,3 +1,4 @@
 openelectricity[analysis]
 streamlit>=1.35
 python-dotenv
+plotly
