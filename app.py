@@ -140,8 +140,10 @@ def compute_band_stats(prices: pd.Series) -> list[dict]:
     return stats
 
 
-def compute_timeseries(prices: pd.Series, freq: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Resample prices by freq; return (% in band df, avg price in band df)."""
+def compute_timeseries(
+    prices: pd.Series, freq: str
+) -> tuple[pd.DataFrame, pd.DataFrame, "date | None"]:
+    """Resample prices by freq; return (% in band df, avg price in band df, last complete date)."""
     freq_rows: list[dict] = []
     avg_rows: list[dict] = []
 
@@ -158,12 +160,19 @@ def compute_timeseries(prices: pd.Series, freq: str) -> tuple[pd.DataFrame, pd.D
         freq_rows.append(freq_row)
         avg_rows.append(avg_row)
 
+    # Drop the last period — it is always an incomplete trailing period
+    freq_rows = freq_rows[:-1]
+    avg_rows  = avg_rows[:-1]
+
     def _to_df(rows: list[dict]) -> pd.DataFrame:
         if not rows:
             return pd.DataFrame()
         return pd.DataFrame(rows).set_index("date")
 
-    return _to_df(freq_rows), _to_df(avg_rows)
+    freq_df = _to_df(freq_rows)
+    avg_df  = _to_df(avg_rows)
+    last_date = freq_df.index[-1].date() if not freq_df.empty else None
+    return freq_df, avg_df, last_date
 
 
 # ── HTML band table ────────────────────────────────────────────────────────────
@@ -281,7 +290,19 @@ _CHART_BASE = dict(
 _YAXIS_BASE = dict(showgrid=True, gridcolor="#f0f0f0", showline=False, zeroline=True, zerolinecolor="#e5e7eb")
 
 
-def render_frequency_chart(freq_df: pd.DataFrame) -> None:
+def _add_data_through_annotation(fig: go.Figure, last_date: "date | None") -> None:
+    if last_date is None:
+        return
+    fig.add_annotation(
+        text=f"Data through {last_date:%d %b %Y}",
+        xref="paper", yref="paper", x=1, y=1,
+        xanchor="right", yanchor="bottom",
+        showarrow=False,
+        font=dict(size=11, color="#9ca3af"),
+    )
+
+
+def render_frequency_chart(freq_df: pd.DataFrame, last_date: "date | None") -> None:
     fig = go.Figure()
     for band in STORAGE_BANDS:
         if band.id not in freq_df.columns:
@@ -291,15 +312,17 @@ def render_frequency_chart(freq_df: pd.DataFrame) -> None:
             name=f"{band.id} · {band.name}",
             line=dict(color=band.color, width=2),
             mode="lines+markers", marker=dict(size=4),
+            hovertemplate="%{y:.0f}%<extra></extra>",
         ))
     fig.update_layout(
         **_CHART_BASE,
         yaxis=dict(**_YAXIS_BASE, title="% of Hours", ticksuffix="%", rangemode="tozero"),
     )
+    _add_data_through_annotation(fig, last_date)
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_avg_price_chart(avg_df: pd.DataFrame) -> None:
+def render_avg_price_chart(avg_df: pd.DataFrame, last_date: "date | None", use_log: bool = True) -> None:
     fig = go.Figure()
     for band in STORAGE_BANDS:
         if band.id not in avg_df.columns or avg_df[band.id].isna().all():
@@ -309,11 +332,15 @@ def render_avg_price_chart(avg_df: pd.DataFrame) -> None:
             name=f"{band.id} · {band.name}",
             line=dict(color=band.color, width=2),
             mode="lines+markers", marker=dict(size=4),
+            hovertemplate="$%{y:,.0f}<extra></extra>",
         ))
+    yaxis_type = "log" if use_log else "linear"
+    tick_fmt = dict(tickformat="$,.0f") if use_log else dict(tickprefix="$")
     fig.update_layout(
         **_CHART_BASE,
-        yaxis=dict(**_YAXIS_BASE, title="Avg Price ($/MWh)", tickprefix="$"),
+        yaxis=dict(**_YAXIS_BASE, title="Avg Price ($/MWh)", type=yaxis_type, **tick_fmt),
     )
+    _add_data_through_annotation(fig, last_date)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -398,7 +425,7 @@ chart_freq_label = st.radio(
 )
 chart_freq = CHART_FREQS[chart_freq_label]
 
-freq_df, avg_df = compute_timeseries(prices, chart_freq)
+freq_df, avg_df, last_date = compute_timeseries(prices, chart_freq)
 
 if freq_df.empty:
     st.info("Not enough data to plot trends at this interval. Try a wider timeframe or smaller interval.")
@@ -406,10 +433,11 @@ else:
     col_left, col_right = st.columns(2)
     with col_left:
         st.markdown("**Band Frequency** — % of hours in each band per period")
-        render_frequency_chart(freq_df)
+        render_frequency_chart(freq_df, last_date)
     with col_right:
         st.markdown("**Average Band Price** — avg $/MWh within each band per period")
-        render_avg_price_chart(avg_df)
+        use_log = st.checkbox("Logarithmic Y-axis", value=True, key="log_scale")
+        render_avg_price_chart(avg_df, last_date, use_log)
 
 st.markdown("&nbsp;")
 st.caption(
