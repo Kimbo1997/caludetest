@@ -208,7 +208,6 @@ def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> p
         )
 
     cfg = US_ISOS[iso_key]
-    iso = getattr(gs, cfg["cls"])()
 
     chunks: list[tuple[date, date]] = []
     cursor = date_start
@@ -224,6 +223,8 @@ def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> p
 
     def _fetch_one(idx: int, cs: date, ce: date) -> None:
         nonlocal completed_count
+        # Create a fresh ISO instance per thread — gridstatus objects are not thread-safe
+        iso = getattr(gs, cfg["cls"])()
         for attempt in range(3):
             try:
                 df = _iso_call_lmp(iso_key, iso, cs, ce)
@@ -730,7 +731,9 @@ for rname in region_names:
                 f"API key rejected for {rname} (403). Check your credentials in .env."
             )
         else:
-            st.error(f"Error fetching {rname}: {msg}")
+            # Include the exception type so blank-message errors are still identifiable
+            err_detail = msg or f"({type(exc).__name__} — no message)"
+            st.error(f"Error fetching {rname}: {err_detail}")
 
 if not all_prices:
     st.stop()
