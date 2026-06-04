@@ -32,6 +32,26 @@ REGION_COLORS = {
     "TAS": "#059669",
 }
 
+US_ISOS: dict[str, dict] = {
+    "CAISO":  {"cls": "CAISO",  "hub": "TH_NP15_GEN-APND"},
+    "ERCOT":  {"cls": "ERCOT",  "hub": "HB_NORTH"},
+    "NYISO":  {"cls": "NYISO",  "hub": "CAPITL"},
+    "PJM":    {"cls": "PJM",    "hub": "WESTERN HUB"},
+    "MISO":   {"cls": "MISO",   "hub": "MICHIGAN.HUB"},
+    "ISO-NE": {"cls": "ISONE",  "hub": ".H.INTERNAL_HUB"},
+    "SPP":    {"cls": "SPP",    "hub": "SPPNORTH_HUB"},
+}
+
+US_COLORS: dict[str, str] = {
+    "CAISO":  "#2563eb",
+    "ERCOT":  "#dc2626",
+    "NYISO":  "#7c3aed",
+    "PJM":    "#d97706",
+    "MISO":   "#059669",
+    "ISO-NE": "#0891b2",
+    "SPP":    "#b45309",
+}
+
 _today = date.today()
 
 PRESETS: dict[str, tuple[date, date]] = {
@@ -55,7 +75,7 @@ CHART_FREQS: dict[str, str] = {
 }
 
 
-# ── Data fetching ──────────────────────────────────────────────────────────────
+# ── Data fetching — Australia ──────────────────────────────────────────────────
 
 def _fetch_chunk(client: OEClient, region_code: str, chunk_start: date, chunk_end: date) -> pd.Series:
     response = client.get_market(
@@ -84,7 +104,7 @@ def _fetch_chunk(client: OEClient, region_code: str, chunk_start: date, chunk_en
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_prices(region_code: str, date_start: date, date_end: date) -> pd.Series:
-    """Fetch hourly spot prices, chunked into 30-day windows to respect API limits."""
+    """Fetch hourly NEM spot prices, chunked into 30-day windows."""
     api_key = os.environ.get("OPENELECTRICITY_API_KEY", "")
 
     chunks: list[tuple[date, date]] = []
@@ -123,6 +143,88 @@ def fetch_prices(region_code: str, date_start: date, date_end: date) -> pd.Serie
     return combined
 
 
+# ── Data fetching — USA ────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> pd.Series:
+    """Fetch hourly real-time LMP prices for a US ISO via gridstatus."""
+    import gridstatus as gs
+
+    cfg = US_ISOS[iso_key]
+    iso = getattr(gs, cfg["cls"])()
+    hub = cfg["hub"]
+
+    chunks: list[tuple[date, date]] = []
+    cursor = date_start
+    while cursor <= date_end:
+        chunk_end = min(cursor + timedelta(days=CHUNK_DAYS - 1), date_end)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+
+    series_list: list[pd.Series] = []
+    progress = st.progress(0, text=f"Fetching {iso_key}… (0 / {len(chunks)} chunks)")
+
+    for i, (cs, ce) in enumerate(chunks):
+        for attempt in range(3):
+            try:
+                df = iso.get_lmp(
+                    date=cs.isoformat(),
+                    end=(ce + timedelta(days=1)).isoformat(),
+                    market="RTHR",
+                    location_type="HUB",
+                    verbose=False,
+                )
+                break
+            except Exception as exc:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    raise
+
+        # Normalise column names — gridstatus varies by ISO
+        df.columns = [str(c).strip() for c in df.columns]
+        time_col  = next((c for c in df.columns if c.lower() in ("time", "interval start", "interval_start")), None)
+        if time_col is None:
+            time_col = next((c for c in df.columns if "time" in c.lower() or "interval" in c.lower()), df.columns[0])
+        loc_col   = next((c for c in df.columns if "location" in c.lower()), None)
+        price_col = next((c for c in df.columns if c.upper() == "LMP"), None)
+        if price_col is None:
+            price_col = next((c for c in df.columns if "lmp" in c.lower()), None)
+        if price_col is None:
+            raise ValueError(f"No LMP column in {iso_key} response. Columns: {list(df.columns)}")
+
+        if loc_col:
+            mask = df[loc_col].astype(str).str.upper() == hub.upper()
+            hub_df = df[mask]
+            if hub_df.empty:
+                available = df[loc_col].unique()[:10].tolist()
+                raise ValueError(
+                    f"Hub '{hub}' not found in {iso_key} data. "
+                    f"Available: {available}"
+                )
+        else:
+            hub_df = df
+
+        hourly = hub_df.set_index(time_col)[price_col].copy()
+        hourly.index = pd.to_datetime(hourly.index, utc=True)
+        hourly = hourly.resample("1h").mean().dropna()
+        series_list.append(hourly)
+
+        progress.progress(
+            (i + 1) / len(chunks),
+            text=f"Fetching {iso_key}… ({i + 1} / {len(chunks)} chunks)",
+        )
+
+    progress.empty()
+
+    if not series_list:
+        return pd.Series(dtype=float)
+
+    combined = pd.concat(series_list)
+    combined = combined[~combined.index.duplicated(keep="first")].sort_index()
+    return combined
+
+
 # ── Band statistics ────────────────────────────────────────────────────────────
 
 def _band_mask(prices: pd.Series, band) -> pd.Series:
@@ -149,7 +251,6 @@ def compute_band_stats(prices: pd.Series) -> list[dict]:
 def compute_timeseries(
     prices: pd.Series, freq: str
 ) -> tuple[pd.DataFrame, pd.DataFrame, "date | None"]:
-    """Resample prices by freq; return (% in band df, avg price in band df, last complete date)."""
     freq_rows: list[dict] = []
     avg_rows: list[dict] = []
 
@@ -181,11 +282,10 @@ def compute_timeseries(
 
 
 def compute_spot_timeseries(prices: pd.Series, freq: str) -> tuple[pd.Series, "date | None"]:
-    """Resample raw spot prices to mean per period, dropping last incomplete period."""
     resampled = prices.resample(freq).mean().dropna()
     if len(resampled) <= 1:
         return pd.Series(dtype=float), None
-    resampled = resampled.iloc[:-1]  # drop last incomplete period
+    resampled = resampled.iloc[:-1]
     last_date = resampled.index[-1].date()
     return resampled, last_date
 
@@ -193,7 +293,6 @@ def compute_spot_timeseries(prices: pd.Series, freq: str) -> tuple[pd.Series, "d
 def compute_threshold_timeseries(
     prices: pd.Series, threshold: float, freq: str
 ) -> tuple[pd.DataFrame, "date | None"]:
-    """Return % hours below/above threshold per period, dropping the trailing incomplete period."""
     rows: list[dict] = []
     for period, group in prices.groupby(pd.Grouper(freq=freq)):
         if len(group) == 0:
@@ -262,10 +361,18 @@ _CSS = """
 """
 
 
-def _fmt_avg(avg: float | None) -> str:
+def _fmt_avg(avg: float | None, currency: str = "$") -> str:
     if avg is None:
         return "–"
-    return f"-${abs(avg):,.0f}" if avg < 0 else f"${avg:,.0f}"
+    return f"-{currency}{abs(avg):,.0f}" if avg < 0 else f"{currency}{avg:,.0f}"
+
+
+def _fmt_band_range(band, currency: str = "$") -> str:
+    if band.min_price is None:
+        return f"< {currency}0"
+    elif band.max_price is None:
+        return f"> {currency}{band.min_price:,.0f}"
+    return f"{currency}{band.min_price:,.0f} – {currency}{band.max_price:,.0f}"
 
 
 def _fmt_hours(hours: float) -> str:
@@ -284,8 +391,8 @@ def _metric_card(label: str, value: str, accent: str) -> str:
     )
 
 
-def _region_pill(rname: str) -> None:
-    color = REGION_COLORS.get(rname, "#6b7280")
+def _region_pill(rname: str, color_map: dict) -> None:
+    color = color_map.get(rname, "#6b7280")
     st.markdown(
         f'<span style="display:inline-block;padding:4px 12px;border-radius:12px;'
         f'background:{color};color:#fff;font-size:13px;font-weight:600;'
@@ -294,7 +401,7 @@ def _region_pill(rname: str) -> None:
     )
 
 
-def render_band_table(stats: list[dict]) -> None:
+def render_band_table(stats: list[dict], currency: str = "$") -> None:
     max_pct = max(s["pct"] for s in stats) or 1.0
     rows = ""
     for s in stats:
@@ -304,8 +411,8 @@ def render_band_table(stats: list[dict]) -> None:
         <tr>
           <td><span class="badge" style="background:{band.color}">{band.id}</span></td>
           <td class="strong">{band.name}</td>
-          <td class="mono">{band.range_label}</td>
-          <td class="strong">{_fmt_avg(s['avg'])}</td>
+          <td class="mono">{_fmt_band_range(band, currency)}</td>
+          <td class="strong">{_fmt_avg(s['avg'], currency)}</td>
           <td class="dim">{_fmt_hours(s['hours'])}</td>
           <td class="strong" style="color:{band.color}">{s['pct']:.1f}%</td>
           <td>
@@ -362,7 +469,8 @@ def _add_data_through_annotation(fig: go.Figure, last_date: "date | None") -> No
 
 
 def render_spot_price_chart(
-    all_prices: dict[str, pd.Series], freq: str, use_log: bool
+    all_prices: dict[str, pd.Series], freq: str, use_log: bool,
+    color_map: dict, currency: str = "$",
 ) -> None:
     fig = go.Figure()
     last_date = None
@@ -375,16 +483,16 @@ def render_spot_price_chart(
         fig.add_trace(go.Scatter(
             x=resampled.index, y=resampled.values,
             name=rname,
-            line=dict(color=REGION_COLORS.get(rname, "#6b7280"), width=2),
+            line=dict(color=color_map.get(rname, "#6b7280"), width=2),
             mode="lines+markers", marker=dict(size=4),
-            hovertemplate="$%{y:,.0f}<extra></extra>",
+            hovertemplate=f"{currency}%{{y:,.0f}}<extra></extra>",
         ))
     yaxis_type = "log" if use_log else "linear"
-    tick_fmt = dict(tickformat="$,.0f") if use_log else dict(tickprefix="$")
+    tick_fmt = dict(tickformat=f"{currency},.0f") if use_log else dict(tickprefix=currency)
     fig.update_layout(
         **_CHART_BASE,
         height=340,
-        yaxis=dict(**_YAXIS_BASE, title="Avg Spot Price ($/MWh)", type=yaxis_type, **tick_fmt),
+        yaxis=dict(**_YAXIS_BASE, title=f"Avg Spot Price ({currency}/MWh)", type=yaxis_type, **tick_fmt),
     )
     _add_data_through_annotation(fig, last_date)
     if use_log:
@@ -418,13 +526,13 @@ def render_avg_price_chart(
     last_date: "date | None",
     use_log: bool = True,
     y_cap: float | None = None,
+    currency: str = "$",
 ) -> None:
     fig = go.Figure()
     for band in STORAGE_BANDS:
         if band.id not in avg_df.columns or avg_df[band.id].isna().all():
             continue
         actual = avg_df[band.id]
-        # B1 has negative averages — on log scale plot abs() with dashed line
         y_vals = actual.abs() if (use_log and band.id == "B1") else actual
         dash = "dash" if (use_log and band.id == "B1") else "solid"
         fig.add_trace(go.Scatter(
@@ -433,10 +541,10 @@ def render_avg_price_chart(
             name=f"{band.id} · {band.name}",
             line=dict(color=band.color, width=2, dash=dash),
             mode="lines+markers", marker=dict(size=4),
-            hovertemplate="$%{customdata:,.0f}<extra></extra>",
+            hovertemplate=f"{currency}%{{customdata:,.0f}}<extra></extra>",
         ))
     yaxis_type = "log" if use_log else "linear"
-    tick_fmt = dict(tickformat="$,.0f") if use_log else dict(tickprefix="$")
+    tick_fmt = dict(tickformat=f"{currency},.0f") if use_log else dict(tickprefix=currency)
     y_range = None
     if not use_log and y_cap is not None:
         y_range = [None, y_cap]
@@ -445,7 +553,7 @@ def render_avg_price_chart(
         height=380,
         yaxis=dict(
             **_YAXIS_BASE,
-            title="Avg Price ($/MWh)",
+            title=f"Avg Price ({currency}/MWh)",
             type=yaxis_type,
             range=y_range,
             **tick_fmt,
@@ -458,12 +566,12 @@ def render_avg_price_chart(
 
 
 def render_threshold_chart(
-    df: pd.DataFrame, threshold: float, last_date: "date | None"
+    df: pd.DataFrame, threshold: float, last_date: "date | None", currency: str = "$"
 ) -> None:
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=df.index, y=df["below"],
-        name=f"Below ${threshold:,.0f}",
+        name=f"Below {currency}{threshold:,.0f}",
         stackgroup="one",
         fillcolor="rgba(22, 163, 74, 0.75)",
         line=dict(width=0),
@@ -471,7 +579,7 @@ def render_threshold_chart(
     ))
     fig.add_trace(go.Scatter(
         x=df.index, y=df["above"],
-        name=f"Above ${threshold:,.0f}",
+        name=f"Above {currency}{threshold:,.0f}",
         stackgroup="one",
         fillcolor="rgba(220, 38, 38, 0.75)",
         line=dict(width=0),
@@ -494,13 +602,28 @@ st.markdown(_CSS, unsafe_allow_html=True)
 # ── Sidebar controls ───────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.header("⚡ NEM Price Bands")
+    st.header("⚡ Price Band Analyser")
+
+    market = st.radio("Market", ["Australia 🇦🇺", "USA 🇺🇸"], horizontal=True)
+    is_australia = market.startswith("Australia")
 
     st.subheader("Data")
-    region_names: list[str] = st.multiselect(
-        "Regions", list(REGIONS.keys()), default=["NSW"]
-    )
-    preset = st.selectbox("Timeframe", list(PRESETS.keys()), index=0)
+    if is_australia:
+        region_names: list[str] = st.multiselect(
+            "Regions", list(REGIONS.keys()), default=["NSW"]
+        )
+        currency = "$"
+        color_map = REGION_COLORS
+        data_label = "NEM · Real-time spot price"
+    else:
+        region_names = st.multiselect(
+            "ISOs", list(US_ISOS.keys()), default=["CAISO"]
+        )
+        currency = "$"
+        color_map = US_COLORS
+        data_label = "Real-time hourly LMP"
+
+    preset = st.selectbox("Timeframe", list(PRESETS.keys()), index=3)
 
     if preset == "Custom":
         date_start = st.date_input("From", PRESETS["Custom"][0])
@@ -538,11 +661,11 @@ if not region_names:
 
 # ── Main content ───────────────────────────────────────────────────────────────
 
-st.title("NEM Price Band Analyser")
+st.title("Price Band Analyser")
 st.caption(
-    f"Spot price distribution · 1-hour intervals · "
+    f"{data_label} · 1-hour intervals · "
     f"{date_start:%d %b %Y} – {date_end:%d %b %Y} · "
-    f"Regions: {', '.join(region_names)}"
+    f"{', '.join(region_names)}"
 )
 
 st.divider()
@@ -552,20 +675,31 @@ st.divider()
 all_prices: dict[str, pd.Series] = {}
 for rname in region_names:
     try:
-        p = fetch_prices(REGIONS[rname], date_start, date_end)
+        if is_australia:
+            p = fetch_prices(REGIONS[rname], date_start, date_end)
+        else:
+            p = fetch_prices_gridstatus(rname, date_start, date_end)
+
         if p.empty:
             st.warning(f"No data returned for {rname}.")
         else:
             all_prices[rname] = p
+
     except Exception as exc:
         msg = str(exc)
-        if "403" in msg:
+        if "ERCOT" in rname and ("401" in msg or "403" in msg or "key" in msg.lower()):
             st.error(
-                f"API key rejected for {rname} (403). Check OPENELECTRICITY_API_KEY in .env "
-                "and that your account is active at platform.openelectricity.org.au"
+                "ERCOT requires a free API key. Register at https://apiexplorer.ercot.com → "
+                "Products → Public API → Subscribe, then add ERCOT_API_KEY to your .env file."
+            )
+        elif "not found" in msg.lower() or "hub" in msg.lower():
+            st.error(f"{rname}: {msg}")
+        elif "403" in msg:
+            st.error(
+                f"API key rejected for {rname} (403). Check your credentials in .env."
             )
         else:
-            st.error(f"API error fetching {rname}: {msg}")
+            st.error(f"Error fetching {rname}: {msg}")
 
 if not all_prices:
     st.stop()
@@ -583,9 +717,9 @@ for col, (rname, prices) in zip(metric_cols, all_prices.items()):
         neg_color  = "#16a34a" if neg_pct > 5 else "#6b7280"
         high_color = "#dc2626" if high_pct > 10 else "#6b7280"
 
-        avg_str  = f"-${abs(avg_price):,.0f}" if avg_price < 0 else f"${avg_price:,.0f}"
+        avg_str = f"-{currency}{abs(avg_price):,.0f}" if avg_price < 0 else f"{currency}{avg_price:,.0f}"
 
-        _region_pill(rname)
+        _region_pill(rname, color_map)
         mc1, mc2, mc3 = st.columns(3)
         with mc1:
             st.html(_metric_card("Avg Price", f"{avg_str}/MWh", avg_color))
@@ -602,15 +736,15 @@ st.subheader("Band Distribution")
 table_cols = st.columns(len(all_prices))
 for col, (rname, prices) in zip(table_cols, all_prices.items()):
     with col:
-        _region_pill(rname)
-        render_band_table(compute_band_stats(prices))
+        _region_pill(rname, color_map)
+        render_band_table(compute_band_stats(prices), currency)
 
 st.divider()
 
 # ── Spot price chart ───────────────────────────────────────────────────────────
 
 st.subheader("Spot Price")
-render_spot_price_chart(all_prices, chart_freq, use_log_spot)
+render_spot_price_chart(all_prices, chart_freq, use_log_spot, color_map, currency)
 
 st.divider()
 
@@ -619,7 +753,7 @@ st.divider()
 st.subheader("Price Band Trends Over Time")
 
 for rname, prices in all_prices.items():
-    _region_pill(rname)
+    _region_pill(rname, color_map)
     freq_df, avg_df, last_date = compute_timeseries(prices, chart_freq)
     if freq_df.empty:
         st.info(f"Not enough data for {rname} at this interval.")
@@ -629,25 +763,25 @@ for rname, prices in all_prices.items():
         st.caption("Band Frequency — % of hours in each band per period")
         render_frequency_chart(freq_df, last_date)
     with cr:
-        st.caption("Average Band Price — avg $/MWh within each band per period")
-        render_avg_price_chart(avg_df, last_date, use_log_avg, y_cap)
+        st.caption(f"Average Band Price — avg {currency}/MWh within each band per period")
+        render_avg_price_chart(avg_df, last_date, use_log_avg, y_cap, currency)
 
 st.divider()
 
 # ── Above / Below Threshold ────────────────────────────────────────────────────
 
 st.subheader("Above / Below Price Threshold")
-st.caption(f"Threshold set to ${threshold:,.0f}/MWh — adjust in the sidebar")
+st.caption(f"Threshold set to {currency}{threshold:,.0f}/MWh — adjust in the sidebar")
 
 for rname, prices in all_prices.items():
-    _region_pill(rname)
+    _region_pill(rname, color_map)
     thr_df, thr_last_date = compute_threshold_timeseries(prices, threshold, chart_freq)
     if thr_df.empty:
         st.info(f"Not enough data for {rname} at this interval.")
     else:
-        render_threshold_chart(thr_df, threshold, thr_last_date)
+        render_threshold_chart(thr_df, threshold, thr_last_date, currency)
 
 st.caption(
-    f"Source: Open Electricity API · 1-hour intervals · "
-    f"{date_start:%d %b %Y} – {date_end:%d %b %Y}"
+    f"Source: {'Open Electricity API' if is_australia else 'gridstatus / ISO public data'} · "
+    f"1-hour intervals · {date_start:%d %b %Y} – {date_end:%d %b %Y}"
 )
