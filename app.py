@@ -48,7 +48,7 @@ def fetch_prices(region_code: str, date_start: date, date_end: date) -> pd.Serie
             metrics=[MarketMetric.PRICE],
             interval="1h",
             date_start=datetime.combine(date_start, datetime.min.time()),
-            date_end=datetime.combine(date_end, datetime.max.time()),
+            date_end=datetime.combine(date_end + timedelta(days=1), datetime.min.time()),
             network_region=region_code,
         )
 
@@ -186,8 +186,9 @@ def render_band_table(stats: list[dict]) -> None:
           </td>
         </tr>"""
 
-    st.markdown(
-        _CSS + f"""
+    # Inject CSS once via markdown, render table via st.html
+    st.markdown(_CSS, unsafe_allow_html=True)
+    st.html(f"""
         <div class="pbt-wrap">
         <table class="pbt">
           <thead><tr>
@@ -199,9 +200,7 @@ def render_band_table(stats: list[dict]) -> None:
           <tbody>{rows}</tbody>
         </table>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """)
 
 
 # ── Page layout ────────────────────────────────────────────────────────────────
