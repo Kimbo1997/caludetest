@@ -292,7 +292,6 @@ def render_band_table(stats: list[dict]) -> None:
 # ── Plotly charts ──────────────────────────────────────────────────────────────
 
 _CHART_BASE = dict(
-    height=380,
     margin=dict(t=30, b=60, l=60, r=20),
     hovermode="x unified",
     plot_bgcolor="rgba(0,0,0,0)",
@@ -354,6 +353,7 @@ def render_frequency_chart(freq_df: pd.DataFrame, last_date: "date | None") -> N
         ))
     fig.update_layout(
         **_CHART_BASE,
+        height=380,
         yaxis=dict(**_YAXIS_BASE, title="% of Hours", ticksuffix="%", rangemode="tozero"),
     )
     _add_data_through_annotation(fig, last_date)
@@ -389,6 +389,7 @@ def render_avg_price_chart(
         y_range = [None, y_cap]
     fig.update_layout(
         **_CHART_BASE,
+        height=380,
         yaxis=dict(
             **_YAXIS_BASE,
             title="Avg Price ($/MWh)",
@@ -425,6 +426,7 @@ def render_threshold_chart(
     ))
     fig.update_layout(
         **_CHART_BASE,
+        height=380,
         yaxis=dict(**_YAXIS_BASE, title="% of Hours", ticksuffix="%", range=[0, 100]),
     )
     _add_data_through_annotation(fig, last_date)
