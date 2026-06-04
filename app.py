@@ -1,5 +1,4 @@
 import os
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
@@ -218,35 +217,30 @@ def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> p
 
     progress = st.progress(0, text=f"Fetching {iso_key}… (0 / {len(chunks)} chunks)")
     results: dict[int, pd.Series] = {}
-    completed_count = 0
-    lock = threading.Lock()
 
     def _fetch_one(idx: int, cs: date, ce: date) -> None:
-        nonlocal completed_count
-        # Create a fresh ISO instance per thread — gridstatus objects are not thread-safe
+        # Fresh ISO instance per thread — gridstatus objects are not thread-safe
         iso = getattr(gs, cfg["cls"])()
         for attempt in range(3):
             try:
                 df = _iso_call_lmp(iso_key, iso, cs, ce)
-                series = _lmp_df_to_hourly_series(iso_key, df)
-                break
+                results[idx] = _lmp_df_to_hourly_series(iso_key, df)
+                return
             except Exception as exc:
                 if attempt < 2:
                     time.sleep(2 ** attempt)
                 else:
                     raise
-        with lock:
-            results[idx] = series
-            completed_count += 1
-            progress.progress(
-                completed_count / len(chunks),
-                text=f"Fetching {iso_key}… ({completed_count} / {len(chunks)} chunks)",
-            )
 
+    # Progress is updated in the main thread — st.progress cannot be called from worker threads
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = [pool.submit(_fetch_one, i, cs, ce) for i, (cs, ce) in enumerate(chunks)]
-        for f in as_completed(futures):
+        for done, f in enumerate(as_completed(futures), start=1):
             f.result()  # re-raise any exception from the worker thread
+            progress.progress(
+                done / len(chunks),
+                text=f"Fetching {iso_key}… ({done} / {len(chunks)} chunks)",
+            )
 
     progress.empty()
 
