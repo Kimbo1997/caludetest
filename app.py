@@ -34,19 +34,19 @@ PRESETS: dict[str, tuple[date, date]] = {
     "Custom":             (date(2025, 1, 1),            _today),
 }
 
-INTERVAL_MINUTES = 5  # 5-minute NEM dispatch intervals
+INTERVAL_MINUTES = 30  # 30-minute trading intervals
 
 # ── Data fetching ──────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_prices(region_code: str, date_start: date, date_end: date) -> pd.Series:
-    """Return a Series of spot prices ($/MWh) at 5-minute intervals."""
+    """Return a Series of spot prices ($/MWh) at 30-minute trading intervals."""
     api_key = os.environ.get("OPENELECTRICITY_API_KEY", "")
     with OEClient(api_key=api_key) as client:
         response = client.get_market(
             network_code="NEM",
             metrics=[MarketMetric.PRICE],
-            interval="5m",
+            interval="1h",
             date_start=datetime.combine(date_start, datetime.min.time()),
             date_end=datetime.combine(date_end, datetime.max.time()),
             network_region=region_code,
@@ -273,6 +273,6 @@ render_band_table(stats)
 
 st.markdown("&nbsp;")
 st.caption(
-    f"Source: Open Electricity API · 5-min dispatch intervals · "
+    f"Source: Open Electricity API · 1-hour intervals · "
     f"{len(prices):,} intervals · {date_start:%d %b %Y} – {date_end:%d %b %Y}"
 )
