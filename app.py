@@ -34,38 +34,54 @@ PRESETS: dict[str, tuple[date, date]] = {
     "Custom":             (date(2025, 1, 1),            _today),
 }
 
-INTERVAL_MINUTES = 30  # 30-minute trading intervals
+INTERVAL_MINUTES = 60  # 1-hour intervals
+CHUNK_DAYS = 30        # API limit: max 30 days per request at 1h resolution
+
 
 # ── Data fetching ──────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_prices(region_code: str, date_start: date, date_end: date) -> pd.Series:
-    """Return a Series of spot prices ($/MWh) at 30-minute trading intervals."""
-    api_key = os.environ.get("OPENELECTRICITY_API_KEY", "")
-    with OEClient(api_key=api_key) as client:
-        response = client.get_market(
-            network_code="NEM",
-            metrics=[MarketMetric.PRICE],
-            interval="1h",
-            date_start=datetime.combine(date_start, datetime.min.time()),
-            date_end=datetime.combine(date_end + timedelta(days=1), datetime.min.time()),
-            network_region=region_code,
-        )
-
-    df = response.to_pandas()
-
-    # Locate the price column — handle varying column naming from the client
-    price_col = next(
-        (c for c in df.columns if "price" in str(c).lower()),
-        None,
+def _fetch_chunk(client: OEClient, region_code: str, chunk_start: date, chunk_end: date) -> pd.Series:
+    response = client.get_market(
+        network_code="NEM",
+        metrics=[MarketMetric.PRICE],
+        interval="1h",
+        date_start=datetime.combine(chunk_start, datetime.min.time()),
+        date_end=datetime.combine(chunk_end + timedelta(days=1), datetime.min.time()),
+        network_region=region_code,
     )
+    df = response.to_pandas()
+    price_col = next((c for c in df.columns if "price" in str(c).lower()), None)
     if price_col is None:
         numeric = df.select_dtypes(include="number").columns.tolist()
         if not numeric:
-            raise ValueError(f"Cannot find price column. Got columns: {list(df.columns)}")
+            raise ValueError(f"No price column found. Columns: {list(df.columns)}")
         price_col = numeric[0]
-
     return df[price_col].dropna()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_prices(region_code: str, date_start: date, date_end: date) -> pd.Series:
+    """Fetch spot prices, chunking into 30-day windows to respect API limits."""
+    api_key = os.environ.get("OPENELECTRICITY_API_KEY", "")
+
+    # Build list of (chunk_start, chunk_end) windows
+    chunks: list[tuple[date, date]] = []
+    cursor = date_start
+    while cursor <= date_end:
+        chunk_end = min(cursor + timedelta(days=CHUNK_DAYS - 1), date_end)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+
+    series_list: list[pd.Series] = []
+    progress = st.progress(0, text=f"Fetching data… (0/{len(chunks)} chunks)")
+
+    with OEClient(api_key=api_key) as client:
+        for i, (chunk_start, chunk_end) in enumerate(chunks):
+            series_list.append(_fetch_chunk(client, region_code, chunk_start, chunk_end))
+            progress.progress((i + 1) / len(chunks), text=f"Fetching data… ({i+1}/{len(chunks)} chunks)")
+
+    progress.empty()
+    return pd.concat(series_list).drop_duplicates() if series_list else pd.Series(dtype=float)
 
 
 # ── Band statistics ────────────────────────────────────────────────────────────
@@ -212,7 +228,7 @@ st.set_page_config(
 )
 
 st.title("⚡ NEM Price Band Analyser")
-st.caption("Spot price distribution across 5-minute dispatch intervals — optimised for utility-scale storage.")
+st.caption("Spot price distribution across hourly intervals — optimised for utility-scale storage.")
 
 # Controls
 c1, c2, c3, c4 = st.columns([1, 2, 1, 1])
@@ -235,7 +251,7 @@ st.divider()
 
 # Fetch data
 status_slot = st.empty()
-status_slot.info(f"Fetching {region_name} 5-minute spot prices for {date_start:%d %b %Y} – {date_end:%d %b %Y}…")
+status_slot.info(f"Fetching {region_name} hourly spot prices for {date_start:%d %b %Y} – {date_end:%d %b %Y}…")
 
 try:
     prices = fetch_prices(region_code, date_start, date_end)
