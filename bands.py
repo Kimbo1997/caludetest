@@ -29,11 +29,11 @@ class PriceBand:
 
 
 STORAGE_BANDS: list[PriceBand] = [
-    PriceBand("B1", "Negative",  "Charge Maximum",      None,  0,     "#166534"),
-    PriceBand("B2", "Low",       "Charge",              0,     50,    "#16a34a"),
-    PriceBand("B3", "Neutral",   "Hold",                50,    150,   "#ca8a04"),
-    PriceBand("B4", "Elevated",  "Consider Discharge",  150,   300,   "#ea580c"),
-    PriceBand("B5", "High",      "Discharge",           300,   1000,  "#dc2626"),
-    PriceBand("B6", "Spike",     "Peak Revenue",        1000,  5000,  "#9f1239"),
-    PriceBand("B7", "Extreme",   "Max Revenue Event",   5000,  None,  "#6b21a8"),
+    PriceBand("B1", "", "", None, 0,    "#166534"),
+    PriceBand("B2", "", "", 0,    25,   "#16a34a"),
+    PriceBand("B3", "", "", 25,   50,   "#65a30d"),
+    PriceBand("B4", "", "", 50,   75,   "#ca8a04"),
+    PriceBand("B5", "", "", 75,   100,  "#ea580c"),
+    PriceBand("B6", "", "", 100,  200,  "#dc2626"),
+    PriceBand("B7", "", "", 200,  None, "#9f1239"),
 ]

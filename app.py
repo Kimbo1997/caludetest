@@ -442,7 +442,6 @@ def render_band_table(stats: list[dict], currency: str = "$") -> None:
         rows += f"""
         <tr>
           <td><span class="badge" style="background:{band.color}">{band.id}</span></td>
-          <td class="strong">{band.name}</td>
           <td class="mono">{_fmt_band_range(band, currency)}</td>
           <td class="strong">{_fmt_avg(s['avg'], currency)}</td>
           <td class="dim">{_fmt_hours(s['hours'])}</td>
@@ -458,7 +457,7 @@ def render_band_table(stats: list[dict], currency: str = "$") -> None:
         <div class="pbt-wrap">
         <table class="pbt">
           <thead><tr>
-            <th>Band</th><th>Name</th><th>Range</th>
+            <th>Band</th><th>Range</th>
             <th>Avg Price</th><th>Hours</th><th>%</th><th>Distribution</th>
           </tr></thead>
           <tbody>{rows}</tbody>
@@ -539,7 +538,7 @@ def render_frequency_chart(freq_df: pd.DataFrame, last_date: "date | None") -> N
             continue
         fig.add_trace(go.Scatter(
             x=freq_df.index, y=freq_df[band.id],
-            name=f"{band.id} · {band.name}",
+            name=band.id,
             line=dict(color=band.color, width=2),
             mode="lines+markers", marker=dict(size=4),
             hovertemplate="%{y:.0f}%<extra></extra>",
@@ -570,7 +569,7 @@ def render_avg_price_chart(
         fig.add_trace(go.Scatter(
             x=avg_df.index, y=y_vals,
             customdata=actual,
-            name=f"{band.id} · {band.name}",
+            name=band.id,
             line=dict(color=band.color, width=2, dash=dash),
             mode="lines+markers", marker=dict(size=4),
             hovertemplate=f"{currency}%{{customdata:,.0f}}<extra></extra>",
