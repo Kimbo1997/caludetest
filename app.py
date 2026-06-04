@@ -60,14 +60,9 @@ def _fetch_chunk(client: OEClient, region_code: str, chunk_start: date, chunk_en
     )
     df = response.to_pandas()
 
-    # Ensure datetime index for resampling
-    if not isinstance(df.index, pd.DatetimeIndex):
-        date_col = next(
-            (c for c in df.columns if "date" in str(c).lower() or "time" in str(c).lower()),
-            None,
-        )
-        if date_col:
-            df = df.set_index(date_col)
+    # OE client returns records with an 'interval' column, not a DatetimeIndex
+    if "interval" in df.columns:
+        df = df.set_index("interval")
     df.index = pd.to_datetime(df.index)
 
     price_col = next((c for c in df.columns if "price" in str(c).lower()), None)
