@@ -33,13 +33,14 @@ REGION_COLORS = {
 }
 
 US_ISOS: dict[str, dict] = {
-    "CAISO":  {"cls": "CAISO",  "hub": "TH_NP15_GEN-APND"},
-    "ERCOT":  {"cls": "ERCOT",  "hub": "HB_NORTH"},
-    "NYISO":  {"cls": "NYISO",  "hub": "CAPITL"},
-    "PJM":    {"cls": "PJM",    "hub": "WESTERN HUB"},
-    "MISO":   {"cls": "MISO",   "hub": "MICHIGAN.HUB"},
-    "ISO-NE": {"cls": "ISONE",  "hub": ".H.INTERNAL_HUB"},
-    "SPP":    {"cls": "SPP",    "hub": "SPPNORTH_HUB"},
+    # cls: gridstatus class name  call: dispatch strategy  market: market string (None = not used)
+    "CAISO":  {"cls": "CAISO",  "call": "std",    "market": "DAY_AHEAD_HOURLY"},
+    "ERCOT":  {"cls": "Ercot",  "call": "ercot",  "market": None},            # no market param; class is Ercot
+    "NYISO":  {"cls": "NYISO",  "call": "std",    "market": "REAL_TIME_HOURLY"},
+    "PJM":    {"cls": "PJM",    "call": "std",    "market": "REAL_TIME_HOURLY"},  # needs PJM_API_KEY
+    "MISO":   {"cls": "MISO",   "call": "std",    "market": "REAL_TIME_HOURLY_FINAL"},
+    "ISO-NE": {"cls": "ISONE",  "call": "std",    "market": "REAL_TIME_HOURLY"},
+    "SPP":    {"cls": "SPP",    "call": "spp_da", "market": None},            # no get_lmp(); uses get_lmp_day_ahead_hourly()
 }
 
 US_COLORS: dict[str, str] = {
@@ -145,14 +146,67 @@ def fetch_prices(region_code: str, date_start: date, date_end: date) -> pd.Serie
 
 # ── Data fetching — USA ────────────────────────────────────────────────────────
 
+def _iso_call_lmp(iso_key: str, iso, cs: date, ce: date):
+    """Dispatch the correct get_lmp call per ISO — APIs vary significantly."""
+    cfg = US_ISOS[iso_key]
+    date_str = cs.isoformat()
+    end_str  = (ce + timedelta(days=1)).isoformat()
+    call = cfg["call"]
+
+    if call == "ercot":
+        # ERCOT: no market param; location_type filters to settlement points
+        return iso.get_lmp(date=date_str, end=end_str, location_type="Settlement Point", verbose=False)
+    elif call == "spp_da":
+        # SPP: no get_lmp(); use the day-ahead hourly specific method
+        return iso.get_lmp_day_ahead_hourly(date=date_str, end=end_str, verbose=False)
+    else:
+        # Standard: get_lmp with market string, no location_type
+        return iso.get_lmp(date=date_str, end=end_str, market=cfg["market"], verbose=False)
+
+
+def _lmp_df_to_hourly_series(iso_key: str, df) -> pd.Series:
+    """Normalise a gridstatus LMP DataFrame to an hourly pd.Series (average across locations)."""
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Time column priority: gridstatus consistently uses "Interval Start"
+    time_col = next(
+        (c for c in ["Interval Start", "Time", "SCED Timestamp"] if c in df.columns),
+        None,
+    )
+    if time_col is None:
+        time_col = next(
+            (c for c in df.columns if "interval" in c.lower() or "time" in c.lower()),
+            df.columns[0],
+        )
+
+    # LMP column
+    price_col = "LMP" if "LMP" in df.columns else next(
+        (c for c in df.columns if "lmp" in c.lower()), None
+    )
+    if price_col is None:
+        raise ValueError(f"No LMP column in {iso_key} response. Columns: {list(df.columns)}")
+
+    # Build series — multiple rows per timestamp (one per location); resample averages them
+    s = df.set_index(time_col)[price_col].copy()
+    s.index = pd.to_datetime(s.index, utc=True)
+    return s.resample("1h").mean().dropna()
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> pd.Series:
-    """Fetch hourly real-time LMP prices for a US ISO via gridstatus."""
+    """Fetch hourly LMP prices for a US ISO via gridstatus, averaged across all returned locations."""
     import gridstatus as gs
+
+    # PJM requires a free API key — give a clear message if missing
+    if iso_key == "PJM" and not os.environ.get("PJM_API_KEY"):
+        raise ValueError(
+            "PJM requires a free API key. Register at dataminer2.pjm.com → "
+            "sign in → My Account → API Keys, then add PJM_API_KEY to your .env file."
+        )
 
     cfg = US_ISOS[iso_key]
     iso = getattr(gs, cfg["cls"])()
-    hub = cfg["hub"]
 
     chunks: list[tuple[date, date]] = []
     cursor = date_start
@@ -167,13 +221,7 @@ def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> p
     for i, (cs, ce) in enumerate(chunks):
         for attempt in range(3):
             try:
-                df = iso.get_lmp(
-                    date=cs.isoformat(),
-                    end=(ce + timedelta(days=1)).isoformat(),
-                    market="RTHR",
-                    location_type="HUB",
-                    verbose=False,
-                )
+                df = _iso_call_lmp(iso_key, iso, cs, ce)
                 break
             except Exception as exc:
                 if attempt < 2:
@@ -181,35 +229,7 @@ def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> p
                 else:
                     raise
 
-        # Normalise column names — gridstatus varies by ISO
-        df.columns = [str(c).strip() for c in df.columns]
-        time_col  = next((c for c in df.columns if c.lower() in ("time", "interval start", "interval_start")), None)
-        if time_col is None:
-            time_col = next((c for c in df.columns if "time" in c.lower() or "interval" in c.lower()), df.columns[0])
-        loc_col   = next((c for c in df.columns if "location" in c.lower()), None)
-        price_col = next((c for c in df.columns if c.upper() == "LMP"), None)
-        if price_col is None:
-            price_col = next((c for c in df.columns if "lmp" in c.lower()), None)
-        if price_col is None:
-            raise ValueError(f"No LMP column in {iso_key} response. Columns: {list(df.columns)}")
-
-        if loc_col:
-            mask = df[loc_col].astype(str).str.upper() == hub.upper()
-            hub_df = df[mask]
-            if hub_df.empty:
-                available = df[loc_col].unique()[:10].tolist()
-                raise ValueError(
-                    f"Hub '{hub}' not found in {iso_key} data. "
-                    f"Available: {available}"
-                )
-        else:
-            hub_df = df
-
-        hourly = hub_df.set_index(time_col)[price_col].copy()
-        hourly.index = pd.to_datetime(hourly.index, utc=True)
-        hourly = hourly.resample("1h").mean().dropna()
-        series_list.append(hourly)
-
+        series_list.append(_lmp_df_to_hourly_series(iso_key, df))
         progress.progress(
             (i + 1) / len(chunks),
             text=f"Fetching {iso_key}… ({i + 1} / {len(chunks)} chunks)",
