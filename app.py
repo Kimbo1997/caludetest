@@ -1,5 +1,7 @@
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -215,32 +217,42 @@ def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> p
         chunks.append((cursor, chunk_end))
         cursor = chunk_end + timedelta(days=1)
 
-    series_list: list[pd.Series] = []
     progress = st.progress(0, text=f"Fetching {iso_key}… (0 / {len(chunks)} chunks)")
+    results: dict[int, pd.Series] = {}
+    completed_count = 0
+    lock = threading.Lock()
 
-    for i, (cs, ce) in enumerate(chunks):
+    def _fetch_one(idx: int, cs: date, ce: date) -> None:
+        nonlocal completed_count
         for attempt in range(3):
             try:
                 df = _iso_call_lmp(iso_key, iso, cs, ce)
+                series = _lmp_df_to_hourly_series(iso_key, df)
                 break
             except Exception as exc:
                 if attempt < 2:
                     time.sleep(2 ** attempt)
                 else:
                     raise
+        with lock:
+            results[idx] = series
+            completed_count += 1
+            progress.progress(
+                completed_count / len(chunks),
+                text=f"Fetching {iso_key}… ({completed_count} / {len(chunks)} chunks)",
+            )
 
-        series_list.append(_lmp_df_to_hourly_series(iso_key, df))
-        progress.progress(
-            (i + 1) / len(chunks),
-            text=f"Fetching {iso_key}… ({i + 1} / {len(chunks)} chunks)",
-        )
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(_fetch_one, i, cs, ce) for i, (cs, ce) in enumerate(chunks)]
+        for f in as_completed(futures):
+            f.result()  # re-raise any exception from the worker thread
 
     progress.empty()
 
-    if not series_list:
+    if not results:
         return pd.Series(dtype=float)
 
-    combined = pd.concat(series_list)
+    combined = pd.concat([results[i] for i in range(len(chunks))])
     combined = combined[~combined.index.duplicated(keep="first")].sort_index()
     return combined
 
@@ -795,6 +807,20 @@ st.caption(f"Threshold set to {currency}{threshold:,.0f}/MWh — adjust in the s
 
 for rname, prices in all_prices.items():
     _region_pill(rname, color_map)
+    below_pct = float((prices < threshold).mean() * 100)
+    mc1, mc2 = st.columns(2)
+    with mc1:
+        st.html(_metric_card(
+            f"Avg below {currency}{threshold:,.0f}/MWh",
+            f"{below_pct:.1f}% of hours",
+            "#16a34a",
+        ))
+    with mc2:
+        st.html(_metric_card(
+            f"Avg above {currency}{threshold:,.0f}/MWh",
+            f"{100 - below_pct:.1f}% of hours",
+            "#dc2626",
+        ))
     thr_df, thr_last_date = compute_threshold_timeseries(prices, threshold, chart_freq)
     if thr_df.empty:
         st.info(f"Not enough data for {rname} at this interval.")
