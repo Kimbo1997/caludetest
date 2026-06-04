@@ -180,6 +180,16 @@ def compute_timeseries(
     return freq_df, avg_df, last_date
 
 
+def compute_spot_timeseries(prices: pd.Series, freq: str) -> tuple[pd.Series, "date | None"]:
+    """Resample raw spot prices to mean per period, dropping last incomplete period."""
+    resampled = prices.resample(freq).mean().dropna()
+    if len(resampled) <= 1:
+        return pd.Series(dtype=float), None
+    resampled = resampled.iloc[:-1]  # drop last incomplete period
+    last_date = resampled.index[-1].date()
+    return resampled, last_date
+
+
 def compute_threshold_timeseries(
     prices: pd.Series, threshold: float, freq: str
 ) -> tuple[pd.DataFrame, "date | None"]:
@@ -201,7 +211,7 @@ def compute_threshold_timeseries(
     return df, last_date
 
 
-# ── HTML band table ────────────────────────────────────────────────────────────
+# ── HTML components ────────────────────────────────────────────────────────────
 
 _CSS = """
 <style>
@@ -240,6 +250,14 @@ _CSS = """
 .mono  { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 11.5px; }
 .dim   { color: #9ca3af; }
 .strong { font-weight: 600; }
+
+@media (prefers-color-scheme: dark) {
+  .pbt th { border-bottom: 2px solid #374151; color: #6b7280; }
+  .pbt td { border-bottom: 1px solid #1f2937; }
+  .pbt tbody tr:hover td { background: #111827; }
+  .bar-wrap { background: #374151; }
+  .dim { color: #6b7280; }
+}
 </style>
 """
 
@@ -253,6 +271,27 @@ def _fmt_avg(avg: float | None) -> str:
 def _fmt_hours(hours: float) -> str:
     h, m = int(hours), int((hours % 1) * 60)
     return f"{h:,}h {m:02d}m"
+
+
+def _metric_card(label: str, value: str, accent: str) -> str:
+    return (
+        f'<div style="padding:12px 14px;border-radius:8px;border-left:3px solid {accent};'
+        f'background:rgba(0,0,0,0.03);margin-bottom:4px">'
+        f'<div style="font-size:10px;font-weight:600;text-transform:uppercase;'
+        f'letter-spacing:.06em;color:#9ca3af;margin-bottom:4px">{label}</div>'
+        f'<div style="font-size:20px;font-weight:700">{value}</div>'
+        f"</div>"
+    )
+
+
+def _region_pill(rname: str) -> None:
+    color = REGION_COLORS.get(rname, "#6b7280")
+    st.markdown(
+        f'<span style="display:inline-block;padding:4px 12px;border-radius:12px;'
+        f'background:{color};color:#fff;font-size:13px;font-weight:600;'
+        f'letter-spacing:.04em;margin-bottom:6px">{rname}</span>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_band_table(stats: list[dict]) -> None:
@@ -297,12 +336,17 @@ _CHART_BASE = dict(
     plot_bgcolor="rgba(0,0,0,0)",
     paper_bgcolor="rgba(0,0,0,0)",
     legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="left", x=0),
-    xaxis=dict(showgrid=False, showline=True, linecolor="#e5e7eb"),
+    xaxis=dict(
+        showgrid=False, showline=True, linecolor="#e5e7eb",
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikecolor="#9ca3af", spikethickness=1, spikedash="dot",
+        tickangle=0,
+    ),
 )
 
 _YAXIS_BASE = dict(
     showgrid=True, gridcolor="#f0f0f0",
-    showline=False, zeroline=True, zerolinecolor="#e5e7eb",
+    showline=False, zeroline=True, zerolinecolor="#d1d5db", zerolinewidth=2,
 )
 
 
@@ -317,23 +361,32 @@ def _add_data_through_annotation(fig: go.Figure, last_date: "date | None") -> No
     )
 
 
-def render_spot_price_chart(all_prices: dict[str, pd.Series], use_log: bool) -> None:
+def render_spot_price_chart(
+    all_prices: dict[str, pd.Series], freq: str, use_log: bool
+) -> None:
     fig = go.Figure()
+    last_date = None
     for rname, prices in all_prices.items():
+        resampled, ld = compute_spot_timeseries(prices, freq)
+        if resampled.empty:
+            continue
+        if last_date is None:
+            last_date = ld
         fig.add_trace(go.Scatter(
-            x=prices.index, y=prices.values,
+            x=resampled.index, y=resampled.values,
             name=rname,
-            line=dict(color=REGION_COLORS.get(rname, "#6b7280"), width=1),
-            mode="lines",
+            line=dict(color=REGION_COLORS.get(rname, "#6b7280"), width=2),
+            mode="lines+markers", marker=dict(size=4),
             hovertemplate="$%{y:,.0f}<extra></extra>",
         ))
     yaxis_type = "log" if use_log else "linear"
     tick_fmt = dict(tickformat="$,.0f") if use_log else dict(tickprefix="$")
     fig.update_layout(
         **_CHART_BASE,
-        height=300,
-        yaxis=dict(**_YAXIS_BASE, title="Spot Price ($/MWh)", type=yaxis_type, **tick_fmt),
+        height=340,
+        yaxis=dict(**_YAXIS_BASE, title="Avg Spot Price ($/MWh)", type=yaxis_type, **tick_fmt),
     )
+    _add_data_through_annotation(fig, last_date)
     if use_log:
         st.caption("ℹ Negative prices hidden in log scale — switch to linear to see them")
     st.plotly_chart(fig, use_container_width=True)
@@ -438,30 +491,59 @@ def render_threshold_chart(
 st.set_page_config(page_title="NEM Price Bands", page_icon="⚡", layout="wide")
 st.markdown(_CSS, unsafe_allow_html=True)
 
-st.title("⚡ NEM Price Band Analyser")
-st.caption("Spot price distribution across hourly intervals — optimised for utility-scale storage.")
+# ── Sidebar controls ───────────────────────────────────────────────────────────
 
-# Controls row
-c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
-with c1:
+with st.sidebar:
+    st.header("⚡ NEM Price Bands")
+
+    st.subheader("Data")
     region_names: list[str] = st.multiselect(
         "Regions", list(REGIONS.keys()), default=["NSW"]
     )
-with c2:
     preset = st.selectbox("Timeframe", list(PRESETS.keys()), index=0)
 
+    if preset == "Custom":
+        date_start = st.date_input("From", PRESETS["Custom"][0])
+        date_end   = st.date_input("To",   PRESETS["Custom"][1])
+    else:
+        date_start, date_end = PRESETS[preset]
+        date_end = min(date_end, _today)
+
+    st.divider()
+    st.subheader("Chart Options")
+    chart_freq_label = st.radio("X-axis interval", list(CHART_FREQS.keys()), index=1)
+    chart_freq = CHART_FREQS[chart_freq_label]
+
+    st.divider()
+    st.subheader("Spot Price")
+    use_log_spot = st.checkbox("Logarithmic scale", value=False, key="log_spot")
+
+    st.divider()
+    st.subheader("Avg Band Price")
+    use_log_avg = st.checkbox("Logarithmic scale", value=True, key="log_avg")
+    if not use_log_avg:
+        y_cap = float(st.number_input("Cap Y-axis ($/MWh)", value=2000, step=500, min_value=100, key="y_cap"))
+    else:
+        y_cap = None
+
+    st.divider()
+    st.subheader("Price Threshold")
+    threshold = float(st.number_input(
+        "Threshold ($/MWh)", value=150, step=50, min_value=-1000, max_value=20000
+    ))
+
 if not region_names:
-    st.warning("Select at least one region to continue.")
+    st.warning("Select at least one region in the sidebar to continue.")
     st.stop()
 
-if preset == "Custom":
-    with c3:
-        date_start = st.date_input("From", PRESETS["Custom"][0])
-    with c4:
-        date_end = st.date_input("To", PRESETS["Custom"][1])
-else:
-    date_start, date_end = PRESETS[preset]
-    date_end = min(date_end, _today)
+# ── Main content ───────────────────────────────────────────────────────────────
+
+st.title("NEM Price Band Analyser")
+st.caption(
+    f"Spot price distribution · 1-hour intervals · "
+    f"{date_start:%d %b %Y} – {date_end:%d %b %Y} · "
+    f"Regions: {', '.join(region_names)}"
+)
 
 st.divider()
 
@@ -488,25 +570,39 @@ for rname in region_names:
 if not all_prices:
     st.stop()
 
-# ── Summary metrics (compact, per region) ──────────────────────────────────────
+# ── Summary metrics ────────────────────────────────────────────────────────────
 
 metric_cols = st.columns(len(all_prices))
 for col, (rname, prices) in zip(metric_cols, all_prices.items()):
     with col:
-        st.markdown(f"**{rname}**")
-        ma, mb, mc = st.columns(3)
-        ma.metric("Avg Price",    f"${prices.mean():,.0f}/MWh")
-        mb.metric("Negative",     f"{(prices < 0).mean()*100:.1f}%")
-        mc.metric("High (≥$300)", f"{(prices >= 300).mean()*100:.1f}%")
+        avg_price = prices.mean()
+        neg_pct   = (prices < 0).mean() * 100
+        high_pct  = (prices >= 300).mean() * 100
 
-st.markdown("&nbsp;")
+        avg_color  = "#16a34a" if avg_price < 0 else "#2563eb"
+        neg_color  = "#16a34a" if neg_pct > 5 else "#6b7280"
+        high_color = "#dc2626" if high_pct > 10 else "#6b7280"
+
+        avg_str  = f"-${abs(avg_price):,.0f}" if avg_price < 0 else f"${avg_price:,.0f}"
+
+        _region_pill(rname)
+        mc1, mc2, mc3 = st.columns(3)
+        with mc1:
+            st.html(_metric_card("Avg Price", f"{avg_str}/MWh", avg_color))
+        with mc2:
+            st.html(_metric_card("Negative", f"{neg_pct:.1f}%", neg_color))
+        with mc3:
+            st.html(_metric_card("High ≥$300", f"{high_pct:.1f}%", high_color))
+
+st.divider()
 
 # ── Band tables ────────────────────────────────────────────────────────────────
 
+st.subheader("Band Distribution")
 table_cols = st.columns(len(all_prices))
 for col, (rname, prices) in zip(table_cols, all_prices.items()):
     with col:
-        st.markdown(f"##### {rname} — Band Distribution")
+        _region_pill(rname)
         render_band_table(compute_band_stats(prices))
 
 st.divider()
@@ -514,10 +610,7 @@ st.divider()
 # ── Spot price chart ───────────────────────────────────────────────────────────
 
 st.subheader("Spot Price")
-sc1, sc2 = st.columns([4, 1])
-with sc2:
-    use_log_spot = st.checkbox("Log scale", value=False, key="log_spot")
-render_spot_price_chart(all_prices, use_log_spot)
+render_spot_price_chart(all_prices, chart_freq, use_log_spot)
 
 st.divider()
 
@@ -525,32 +618,18 @@ st.divider()
 
 st.subheader("Price Band Trends Over Time")
 
-tr1, tr2, tr3 = st.columns([3, 1, 1])
-with tr1:
-    chart_freq_label = st.radio(
-        "X-axis interval", list(CHART_FREQS.keys()), horizontal=True, index=1
-    )
-    chart_freq = CHART_FREQS[chart_freq_label]
-with tr2:
-    use_log_avg = st.checkbox("Log scale (avg price)", value=True, key="log_avg")
-with tr3:
-    if not use_log_avg:
-        y_cap = float(st.number_input("Cap Y-axis ($/MWh)", value=2000, step=500, min_value=100, key="y_cap"))
-    else:
-        y_cap = None
-
 for rname, prices in all_prices.items():
-    st.markdown(f"##### {rname}")
+    _region_pill(rname)
     freq_df, avg_df, last_date = compute_timeseries(prices, chart_freq)
     if freq_df.empty:
         st.info(f"Not enough data for {rname} at this interval.")
         continue
     cl, cr = st.columns(2)
     with cl:
-        st.markdown("**Band Frequency** — % of hours in each band per period")
+        st.caption("Band Frequency — % of hours in each band per period")
         render_frequency_chart(freq_df, last_date)
     with cr:
-        st.markdown("**Average Band Price** — avg $/MWh within each band per period")
+        st.caption("Average Band Price — avg $/MWh within each band per period")
         render_avg_price_chart(avg_df, last_date, use_log_avg, y_cap)
 
 st.divider()
@@ -558,23 +637,17 @@ st.divider()
 # ── Above / Below Threshold ────────────────────────────────────────────────────
 
 st.subheader("Above / Below Price Threshold")
-th1, _ = st.columns([1, 3])
-with th1:
-    threshold = float(st.number_input(
-        "Threshold price ($/MWh)", value=150, step=50, min_value=-1000, max_value=20000
-    ))
+st.caption(f"Threshold set to ${threshold:,.0f}/MWh — adjust in the sidebar")
 
 for rname, prices in all_prices.items():
-    st.markdown(f"##### {rname}")
+    _region_pill(rname)
     thr_df, thr_last_date = compute_threshold_timeseries(prices, threshold, chart_freq)
     if thr_df.empty:
         st.info(f"Not enough data for {rname} at this interval.")
     else:
         render_threshold_chart(thr_df, threshold, thr_last_date)
 
-st.markdown("&nbsp;")
 st.caption(
     f"Source: Open Electricity API · 1-hour intervals · "
-    f"{date_start:%d %b %Y} – {date_end:%d %b %Y} · "
-    f"Regions: {', '.join(all_prices.keys())}"
+    f"{date_start:%d %b %Y} – {date_end:%d %b %Y}"
 )
