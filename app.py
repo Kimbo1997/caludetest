@@ -91,14 +91,14 @@ EU_COLORS: dict[str, str] = {
 _today = date.today()
 
 PRESETS: dict[str, tuple[date, date]] = {
-    "Full Year 2025":     (date(2025, 1, 1),            date(2025, 12, 31)),
-    "H1 2025 (Jan–Jun)":  (date(2025, 1, 1),            date(2025, 6, 30)),
-    "H2 2025 (Jul–Dec)":  (date(2025, 7, 1),            date(2025, 12, 31)),
     "Last 24 hours":      (_today - timedelta(days=1),   _today),
     "Last 7 days":        (_today - timedelta(days=7),   _today),
     "Last 30 days":       (_today - timedelta(days=30),  _today),
     "Last 90 days":       (_today - timedelta(days=90),  _today),
     "Last 12 months":     (_today - timedelta(days=365), _today),
+    "Full Year 2025":     (date(2025, 1, 1),            date(2025, 12, 31)),
+    "H1 2025 (Jan–Jun)":  (date(2025, 1, 1),            date(2025, 6, 30)),
+    "H2 2025 (Jul–Dec)":  (date(2025, 7, 1),            date(2025, 12, 31)),
     "Custom":             (date(2025, 1, 1),             _today),
 }
 
@@ -110,7 +110,7 @@ CHUNK_DAYS_EU = 90
 
 CHART_FREQS: dict[str, str] = {
     "1 Hour":    "1h",
-    "2 Hours":   "2h",
+    "5 Hours":   "5h",
     "1 Day":     "D",
     "1 Week":    "W",
     "1 Month":   "ME",
@@ -119,9 +119,9 @@ CHART_FREQS: dict[str, str] = {
 }
 
 _FREQ_TICK: dict[str, dict] = {
-    "1h": dict(dtick=30 * 60 * 1000,     tickformat="%H:%M"),
-    "2h": dict(dtick=60 * 60 * 1000,     tickformat="%H:%M"),
-    "D":  dict(dtick=4 * 60 * 60 * 1000, tickformat="%d %b %H:00"),
+    "1h": dict(nticks=12, tickformat="%d %b %H:%M"),
+    "5h": dict(nticks=12, tickformat="%d %b %H:%M"),
+    "D":  dict(nticks=14, tickformat="%d %b"),
 }
 
 # Unified region registry — market: "australia" | "usa" | "europe"
@@ -667,7 +667,7 @@ def render_spot_price_chart(
             name=name,
             line=dict(color=color_map.get(rname, "#6b7280"), width=2),
             mode="lines+markers", marker=dict(size=4),
-            hovertemplate=f"{currency}%{{y:,.0f}}<extra></extra>",
+            hovertemplate=f"{name}: {currency}%{{y:,.0f}}<extra></extra>",
         ))
     yaxis_type = "log" if use_log else "linear"
     tick_fmt = dict(tickprefix=currency, tickformat=",.0f")
@@ -787,7 +787,7 @@ def render_band_distribution_chart(
     band_ids: list[str], currency: str = "$", chart_freq: str = "",
 ) -> None:
     fig = go.Figure()
-    for band in STORAGE_BANDS:
+    for band in reversed(STORAGE_BANDS):
         if band.id not in band_ids or band.id not in freq_df.columns:
             continue
         fig.add_trace(go.Scatter(
@@ -824,16 +824,20 @@ with st.sidebar:
     show_usa = st.checkbox("USA 🇺🇸", value=False)
     show_eu  = st.checkbox("Europe 🇪🇺", value=False)
 
-    available = [
-        r for r, info in ALL_REGIONS.items()
-        if (show_aus and info["market"] == "australia")
-        or (show_usa and info["market"] == "usa")
-        or (show_eu  and info["market"] == "europe")
-    ]
+    _market_order = {"australia": 0, "usa": 1, "europe": 2}
+    _market_flag  = {"australia": "🇦🇺", "usa": "🇺🇸", "europe": "🇪🇺"}
+    available = sorted(
+        [r for r, info in ALL_REGIONS.items()
+         if (show_aus and info["market"] == "australia")
+         or (show_usa and info["market"] == "usa")
+         or (show_eu  and info["market"] == "europe")],
+        key=lambda r: _market_order[ALL_REGIONS[r]["market"]],
+    )
 
     region_names: list[str] = st.multiselect(
         "Regions / ISOs / Countries", available,
         default=[available[0]] if available else [],
+        format_func=lambda r: f"{_market_flag[ALL_REGIONS[r]['market']]} {r}",
     )
 
     currencies = {ALL_REGIONS[r]["currency"] for r in region_names} if region_names else {"$"}
@@ -841,7 +845,7 @@ with st.sidebar:
     color_map = {r: ALL_REGIONS[r]["color"] for r in ALL_REGIONS}
 
     st.subheader("Data")
-    preset = st.selectbox("Timeframe", list(PRESETS.keys()), index=3)
+    preset = st.selectbox("Timeframe", list(PRESETS.keys()), index=2)
 
     if preset == "Custom":
         date_start = st.date_input("From", PRESETS["Custom"][0])
@@ -932,7 +936,7 @@ if da_regions:
 # Mixed-currency note
 if len(currencies) > 1:
     st.info(
-        "Mixed currencies: Australian prices in AUD (A$), US prices in USD ($), "
+        "Mixed currencies: Australian prices in AUD (A\\$), US prices in USD (US\\$), "
         "EU prices in EUR (€). Values plotted on the same axis — "
         "cross-currency comparisons are indicative only."
     )
