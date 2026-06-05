@@ -259,17 +259,36 @@ def _iso_call_lmp(iso_key: str, iso, cs: date, ce: date):
             verbose=False,
         )
     elif call == "spp_rt":
-        # SPP real-time 5-min hub prices via daily files — fast with 1-day chunks
-        return iso.get_lmp_real_time_5_min_by_location(
-            date=date_str, end=end_str,
-            location_type="Hub", use_daily_files=True, verbose=False,
+        # Fetch SPP daily file directly — bypasses gridstatus @support_date_range
+        # decorator which crashes with ValueError when pd.concat([]) is called on
+        # an empty list (when all daily files return 404 for recent/unavailable dates).
+        from gridstatus import Markets
+        url = (
+            "https://portal.spp.org/file-browser-api/download/"
+            f"rtbm-lmp-by-location?path=/{cs.strftime('%Y/%m')}"
+            f"/By_Day/RTBM-LMP-DAILY-SL-{cs.strftime('%Y%m%d')}.csv"
         )
+        try:
+            df = pd.read_csv(url)
+            df.columns = df.columns.str.strip()
+            df = df.rename(columns={
+                "GMT Interval": "GMTIntervalEnd",
+                "Settlement Location Name": "Settlement Location",
+                "PNODE Name": "PNode",
+            })
+            return iso._finalize_spp_df(
+                df, market=Markets.REAL_TIME_5_MIN, location_type="Hub",
+            )
+        except Exception:
+            return pd.DataFrame(columns=["Interval Start", "LMP"])
     else:
         return iso.get_lmp(date=date_str, end=end_str, market=cfg["market"], verbose=False)
 
 
 def _lmp_df_to_hourly_series(iso_key: str, df) -> pd.Series:
     """Normalise a gridstatus LMP DataFrame to an hourly pd.Series (average across locations)."""
+    if df is None or len(df) == 0:
+        return pd.Series(dtype=float)
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
