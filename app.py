@@ -94,6 +94,8 @@ PRESETS: dict[str, tuple[date, date]] = {
     "Full Year 2025":     (date(2025, 1, 1),            date(2025, 12, 31)),
     "H1 2025 (Jan–Jun)":  (date(2025, 1, 1),            date(2025, 6, 30)),
     "H2 2025 (Jul–Dec)":  (date(2025, 7, 1),            date(2025, 12, 31)),
+    "Last 24 hours":      (_today - timedelta(days=1),   _today),
+    "Last 7 days":        (_today - timedelta(days=7),   _today),
     "Last 30 days":       (_today - timedelta(days=30),  _today),
     "Last 90 days":       (_today - timedelta(days=90),  _today),
     "Last 12 months":     (_today - timedelta(days=365), _today),
@@ -105,6 +107,8 @@ CHUNK_DAYS = 30
 CHUNK_DAYS_EU = 90
 
 CHART_FREQS: dict[str, str] = {
+    "1 Hour":    "1h",
+    "1 Day":     "D",
     "1 Week":    "W",
     "1 Month":   "ME",
     "1 Quarter": "QE",
@@ -618,10 +622,14 @@ def render_spot_price_chart(
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_frequency_chart(freq_df: pd.DataFrame, last_date: "date | None") -> None:
+def render_frequency_chart(
+    freq_df: pd.DataFrame, last_date: "date | None", band_ids: "list[str] | None" = None
+) -> None:
     fig = go.Figure()
     for band in STORAGE_BANDS:
         if band.id not in freq_df.columns:
+            continue
+        if band_ids is not None and band.id not in band_ids:
             continue
         fig.add_trace(go.Scatter(
             x=freq_df.index, y=freq_df[band.id],
@@ -645,10 +653,13 @@ def render_avg_price_chart(
     use_log: bool = True,
     y_cap: float | None = None,
     currency: str = "$",
+    band_ids: "list[str] | None" = None,
 ) -> None:
     fig = go.Figure()
     for band in STORAGE_BANDS:
         if band.id not in avg_df.columns or avg_df[band.id].isna().all():
+            continue
+        if band_ids is not None and band.id not in band_ids:
             continue
         actual = avg_df[band.id]
         y_vals = actual.abs() if (use_log and band.id == "B1") else actual
@@ -712,6 +723,31 @@ def render_threshold_chart(
     st.plotly_chart(fig, use_container_width=True)
 
 
+def render_band_distribution_chart(
+    freq_df: pd.DataFrame, last_date: "date | None", band_ids: list[str], currency: str = "$"
+) -> None:
+    fig = go.Figure()
+    for band in STORAGE_BANDS:
+        if band.id not in band_ids or band.id not in freq_df.columns:
+            continue
+        fig.add_trace(go.Scatter(
+            x=freq_df.index, y=freq_df[band.id],
+            name=_fmt_band_range(band, currency),
+            stackgroup="one",
+            groupnorm="percent",
+            line=dict(width=0, color=band.color),
+            fillcolor=band.color,
+            hovertemplate="%{y:.1f}%<extra></extra>",
+        ))
+    fig.update_layout(
+        **_CHART_BASE,
+        height=380,
+        yaxis=dict(**_YAXIS_BASE, title="% of Hours", ticksuffix="%", range=[0, 100]),
+    )
+    _add_data_through_annotation(fig, last_date)
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # ── Page layout ────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="NEM Price Bands", page_icon="⚡", layout="wide")
@@ -761,7 +797,7 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Chart Options")
-    chart_freq_label = st.radio("X-axis interval", list(CHART_FREQS.keys()), index=1)
+    chart_freq_label = st.radio("X-axis interval", list(CHART_FREQS.keys()), index=2)
     chart_freq = CHART_FREQS[chart_freq_label]
 
     st.divider()
@@ -777,10 +813,41 @@ with st.sidebar:
         y_cap = None
 
     st.divider()
-    st.subheader("Price Threshold")
-    threshold = float(st.number_input(
-        f"Threshold ({currency}/MWh)", value=150, step=50, min_value=-1000, max_value=20000
-    ))
+    st.subheader("Band Frequency Chart")
+    freq_band_ids: list[str] = st.multiselect(
+        "Visible bands",
+        [b.id for b in STORAGE_BANDS],
+        default=[b.id for b in STORAGE_BANDS],
+        key="freq_bands",
+    )
+
+    st.divider()
+    st.subheader("Avg Band Price Chart")
+    avg_band_ids: list[str] = st.multiselect(
+        "Visible bands",
+        [b.id for b in STORAGE_BANDS],
+        default=[b.id for b in STORAGE_BANDS],
+        key="avg_bands",
+    )
+
+    st.divider()
+    st.subheader("Price Threshold / Distribution")
+    threshold_mode = st.radio(
+        "Chart type", ["Price Threshold", "Band Distribution"], key="thr_mode"
+    )
+    if threshold_mode == "Price Threshold":
+        threshold = float(st.number_input(
+            f"Threshold ({currency}/MWh)", value=150, step=50, min_value=-1000, max_value=20000
+        ))
+        dist_band_ids: list[str] = []
+    else:
+        threshold = 0.0
+        dist_band_ids = st.multiselect(
+            "Visible bands",
+            [b.id for b in STORAGE_BANDS],
+            default=[b.id for b in STORAGE_BANDS],
+            key="dist_bands",
+        )
 
 if not region_names:
     st.warning("Select at least one region in the sidebar to continue.")
@@ -898,39 +965,42 @@ for rname, prices in all_prices.items():
     cl, cr = st.columns(2)
     with cl:
         st.caption("Band Frequency — % of hours in each band per period")
-        render_frequency_chart(freq_df, last_date)
+        render_frequency_chart(freq_df, last_date, band_ids=freq_band_ids)
     with cr:
         st.caption(f"Average Band Price — avg {currency}/MWh within each band per period")
-        render_avg_price_chart(avg_df, last_date, use_log_avg, y_cap, currency)
+        render_avg_price_chart(avg_df, last_date, use_log_avg, y_cap, currency, band_ids=avg_band_ids)
 
 st.divider()
 
 # ── Above / Below Threshold ────────────────────────────────────────────────────
 
-st.subheader("Above / Below Price Threshold")
-st.caption(f"Threshold set to {currency}{threshold:,.0f}/MWh — adjust in the sidebar")
+if threshold_mode == "Price Threshold":
+    st.subheader("Above / Below Price Threshold")
+    st.caption(f"Threshold set to {currency}{threshold:,.0f}/MWh — adjust in the sidebar")
+else:
+    st.subheader("Band Distribution Over Time")
+    st.caption("100% stacked area — share of hours in each price band per period")
 
 for rname, prices in all_prices.items():
     _region_pill(rname, color_map)
-    below_pct = float((prices < threshold).mean() * 100)
-    mc1, mc2 = st.columns(2)
-    with mc1:
+    if threshold_mode == "Price Threshold":
+        below_pct = float((prices < threshold).mean() * 100)
         st.html(_metric_card(
             f"Avg below {currency}{threshold:,.0f}/MWh",
             f"{below_pct:.1f}% of hours",
             "#16a34a",
         ))
-    with mc2:
-        st.html(_metric_card(
-            f"Avg above {currency}{threshold:,.0f}/MWh",
-            f"{100 - below_pct:.1f}% of hours",
-            "#dc2626",
-        ))
-    thr_df, thr_last_date = compute_threshold_timeseries(prices, threshold, chart_freq)
-    if thr_df.empty:
-        st.info(f"Not enough data for {rname} at this interval.")
+        thr_df, thr_last_date = compute_threshold_timeseries(prices, threshold, chart_freq)
+        if thr_df.empty:
+            st.info(f"Not enough data for {rname} at this interval.")
+        else:
+            render_threshold_chart(thr_df, threshold, thr_last_date, currency)
     else:
-        render_threshold_chart(thr_df, threshold, thr_last_date, currency)
+        freq_df, _, last_date = compute_timeseries(prices, chart_freq)
+        if freq_df.empty:
+            st.info(f"Not enough data for {rname} at this interval.")
+        else:
+            render_band_distribution_chart(freq_df, last_date, dist_band_ids, currency)
 
 _source = (
     "Open Electricity API" if is_australia
