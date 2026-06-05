@@ -196,8 +196,15 @@ def _iso_call_lmp(iso_key: str, iso, cs: date, ce: date):
     call = cfg["call"]
 
     if call == "ercot":
-        # ERCOT: Hub prices — much smaller report than Settlement Point, avoids MIS polling hang
-        return iso.get_lmp(date=date_str, end=end_str, location_type="Hub", verbose=False)
+        # Use get_spp (DAM hourly hub prices) — get_lmp only accepts "Settlement Point" which
+        # triggers large SCED 5-min bulk downloads that hang. get_spp with Trading Hub is small.
+        from gridstatus import Markets
+        return iso.get_spp(
+            date=date_str, end=end_str,
+            market=Markets.DAY_AHEAD_HOURLY,
+            location_type="Trading Hub",
+            verbose=False,
+        )
     elif call == "spp_da":
         # SPP: no get_lmp(); use the day-ahead hourly specific method
         return iso.get_lmp_day_ahead_hourly(date=date_str, end=end_str, verbose=False)
@@ -222,12 +229,16 @@ def _lmp_df_to_hourly_series(iso_key: str, df) -> pd.Series:
             df.columns[0],
         )
 
-    # LMP column
-    price_col = "LMP" if "LMP" in df.columns else next(
-        (c for c in df.columns if "lmp" in c.lower()), None
+    # LMP/SPP column — get_lmp returns "LMP", get_spp (used for ERCOT) returns "SPP"
+    price_col = next(
+        (c for c in ["LMP", "SPP"] if c in df.columns),
+        None,
+    ) or next(
+        (c for c in df.columns if "lmp" in c.lower() or "spp" in c.lower()),
+        None,
     )
     if price_col is None:
-        raise ValueError(f"No LMP column in {iso_key} response. Columns: {list(df.columns)}")
+        raise ValueError(f"No LMP/SPP column in {iso_key} response. Columns: {list(df.columns)}")
 
     # Build series — multiple rows per timestamp (one per location); resample averages them
     s = df.set_index(time_col)[price_col].copy()
