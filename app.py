@@ -1,6 +1,7 @@
 import os
+import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -233,10 +234,15 @@ def _lmp_df_to_hourly_series(iso_key: str, df) -> pd.Series:
     return s.resample("1h").mean().dropna()
 
 
+_CHUNK_TIMEOUT = 120  # seconds per chunk before giving up
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> pd.Series:
     """Fetch hourly LMP prices for a US ISO via gridstatus, averaged across all returned locations."""
     import gridstatus as gs
+    # Suppress gridstatus/requests debug noise (ERCOT polls MIS endpoints verbosely)
+    for _log in ("gridstatus", "urllib3", "requests"):
+        logging.getLogger(_log).setLevel(logging.WARNING)
 
     # PJM requires a free API key — give a clear message if missing
     if iso_key == "PJM" and not os.environ.get("PJM_API_KEY"):
@@ -275,7 +281,14 @@ def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> p
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = [pool.submit(_fetch_one, i, cs, ce) for i, (cs, ce) in enumerate(chunks)]
         for done, f in enumerate(as_completed(futures), start=1):
-            f.result()  # re-raise any exception from the worker thread
+            try:
+                f.result(timeout=_CHUNK_TIMEOUT)
+            except FuturesTimeoutError:
+                raise TimeoutError(
+                    f"{iso_key} chunk fetch timed out after {_CHUNK_TIMEOUT}s. "
+                    "ERCOT's MIS API can hang when data is unavailable for a date range — "
+                    "try a shorter period or a different ISO."
+                )
             progress.progress(
                 done / len(chunks),
                 text=f"Fetching {iso_key}… ({done} / {len(chunks)} chunks)",
