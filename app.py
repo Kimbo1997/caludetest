@@ -105,6 +105,7 @@ PRESETS: dict[str, tuple[date, date]] = {
 
 INTERVAL_MINUTES = 60
 CHUNK_DAYS = 30
+CHUNK_DAYS_ERCOT = 7   # smaller chunks avoid MIS polling hang; runs in parallel so total time is similar
 CHUNK_DAYS_EU = 90
 
 CHART_FREQS: dict[str, str] = {
@@ -195,8 +196,8 @@ def _iso_call_lmp(iso_key: str, iso, cs: date, ce: date):
     call = cfg["call"]
 
     if call == "ercot":
-        # ERCOT: no market param; location_type filters to settlement points
-        return iso.get_lmp(date=date_str, end=end_str, location_type="Settlement Point", verbose=False)
+        # ERCOT: Hub prices — much smaller report than Settlement Point, avoids MIS polling hang
+        return iso.get_lmp(date=date_str, end=end_str, location_type="Hub", verbose=False)
     elif call == "spp_da":
         # SPP: no get_lmp(); use the day-ahead hourly specific method
         return iso.get_lmp_day_ahead_hourly(date=date_str, end=end_str, verbose=False)
@@ -252,11 +253,12 @@ def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> p
         )
 
     cfg = US_ISOS[iso_key]
+    chunk_days = CHUNK_DAYS_ERCOT if iso_key == "ERCOT" else CHUNK_DAYS
 
     chunks: list[tuple[date, date]] = []
     cursor = date_start
     while cursor <= date_end:
-        chunk_end = min(cursor + timedelta(days=CHUNK_DAYS - 1), date_end)
+        chunk_end = min(cursor + timedelta(days=chunk_days - 1), date_end)
         chunks.append((cursor, chunk_end))
         cursor = chunk_end + timedelta(days=1)
 
