@@ -613,11 +613,11 @@ def render_band_table(stats: list[dict], currency: str = "$") -> None:
 # ── Plotly charts ──────────────────────────────────────────────────────────────
 
 _CHART_BASE = dict(
-    margin=dict(t=30, b=60, l=60, r=20),
+    margin=dict(t=40, b=90, l=65, r=20),
     hovermode="x unified",
     plot_bgcolor="rgba(0,0,0,0)",
     paper_bgcolor="rgba(0,0,0,0)",
-    legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="left", x=0, font=dict(size=13)),
+    legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="left", x=0, font=dict(size=13)),
     xaxis=dict(
         showgrid=False, showline=True, linecolor="#e5e7eb",
         showspikes=True, spikemode="across", spikesnap="cursor",
@@ -627,7 +627,7 @@ _CHART_BASE = dict(
 )
 
 _YAXIS_BASE = dict(
-    showgrid=True, gridcolor="#f0f0f0",
+    showgrid=True, gridcolor="rgba(128,128,128,0.15)",
     showline=False, zeroline=True, zerolinecolor="#d1d5db", zerolinewidth=2,
 )
 
@@ -673,9 +673,9 @@ def render_spot_price_chart(
     tick_fmt = dict(tickprefix=currency, tickformat=",.0f")
     x_tick = _FREQ_TICK.get(freq, {})
     fig.update_layout(
-        **_base_layout(height=340),
+        **_base_layout(height=400),
         xaxis=dict(**_CHART_BASE["xaxis"], **x_tick),
-        yaxis=dict(**_YAXIS_BASE, title=f"Avg Spot Price ({currency}/MWh)", type=yaxis_type, **tick_fmt),
+        yaxis=dict(**_YAXIS_BASE, title=f"Avg Price ({currency}/MWh)", type=yaxis_type, **tick_fmt),
     )
     _add_data_through_annotation(fig, last_date)
     if use_log:
@@ -704,7 +704,7 @@ def render_frequency_chart(
         ))
     x_tick = _FREQ_TICK.get(chart_freq, {})
     fig.update_layout(
-        **_base_layout(height=380),
+        **_base_layout(height=420),
         xaxis=dict(**_CHART_BASE["xaxis"], **x_tick),
         yaxis=dict(**_YAXIS_BASE, title="% of Hours", ticksuffix="%", rangemode="tozero"),
     )
@@ -741,13 +741,13 @@ def render_avg_price_chart(
     tick_fmt = dict(tickprefix=currency, tickformat=",.0f")
     x_tick = _FREQ_TICK.get(chart_freq, {})
     fig.update_layout(
-        **_base_layout(height=380),
+        **_base_layout(height=420),
         xaxis=dict(**_CHART_BASE["xaxis"], **x_tick),
         yaxis=dict(**_YAXIS_BASE, title=f"Avg Price ({currency}/MWh)", type=yaxis_type, **tick_fmt),
     )
     _add_data_through_annotation(fig, last_date)
     if use_log:
-        st.caption("ⓘ B1 · Negative band shown as |value|, dashed — hover to see actual price")
+        st.caption("ⓘ B1 (negative) shown as |value|, dashed — hover for actual price")
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -774,7 +774,7 @@ def render_threshold_chart(
     ))
     x_tick = _FREQ_TICK.get(chart_freq, {})
     fig.update_layout(
-        **_base_layout(height=380),
+        **_base_layout(height=420),
         xaxis=dict(**_CHART_BASE["xaxis"], **x_tick),
         yaxis=dict(**_YAXIS_BASE, title="% of Hours", ticksuffix="%", range=[0, 100]),
     )
@@ -801,7 +801,7 @@ def render_band_distribution_chart(
         ))
     x_tick = _FREQ_TICK.get(chart_freq, {})
     fig.update_layout(
-        **_base_layout(height=380),
+        **_base_layout(height=420),
         xaxis=dict(**_CHART_BASE["xaxis"], **x_tick),
         yaxis=dict(**_YAXIS_BASE, title="% of Hours", ticksuffix="%", range=[0, 100]),
     )
@@ -811,18 +811,19 @@ def render_band_distribution_chart(
 
 # ── Page layout ────────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="NEM Price Bands", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Electricity Price Bands", page_icon="⚡", layout="wide")
 st.markdown(_CSS, unsafe_allow_html=True)
 
-# ── Sidebar controls ───────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.header("⚡ Price Band Analyser")
 
+    # ── Markets & Regions ──────────────────────────────────────────────────────
     st.subheader("Markets")
     show_aus = st.checkbox("Australia 🇦🇺", value=True)
-    show_usa = st.checkbox("USA 🇺🇸", value=False)
-    show_eu  = st.checkbox("Europe 🇪🇺", value=False)
+    show_usa = st.checkbox("USA 🇺🇸",       value=False)
+    show_eu  = st.checkbox("Europe 🇪🇺",    value=False)
 
     _market_order = {"australia": 0, "usa": 1, "europe": 2}
     _market_flag  = {"australia": "🇦🇺", "usa": "🇺🇸", "europe": "🇪🇺"}
@@ -844,8 +845,10 @@ with st.sidebar:
     currency = "€" if currencies == {"€"} else "$"
     color_map = {r: ALL_REGIONS[r]["color"] for r in ALL_REGIONS}
 
-    st.subheader("Data")
-    preset = st.selectbox("Timeframe", list(PRESETS.keys()), index=2)
+    # ── Timeframe ──────────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Timeframe")
+    preset = st.selectbox("Period", list(PRESETS.keys()), index=2, label_visibility="collapsed")
 
     if preset == "Custom":
         date_start = st.date_input("From", PRESETS["Custom"][0])
@@ -854,74 +857,70 @@ with st.sidebar:
         date_start, date_end = PRESETS[preset]
         date_end = min(date_end, _today)
 
+    # ── Chart Display ──────────────────────────────────────────────────────────
     st.divider()
-    st.subheader("Chart Options")
+    st.subheader("Chart Display")
     chart_freq_label = st.radio("X-axis interval", list(CHART_FREQS.keys()), index=3)
     chart_freq = CHART_FREQS[chart_freq_label]
 
-    st.divider()
-    st.subheader("Spot Price")
-    use_log_spot = st.checkbox("Logarithmic scale", value=False, key="log_spot")
+    _lcol, _rcol = st.columns(2)
+    with _lcol:
+        use_log_spot = st.checkbox("Log: spot", value=False, key="log_spot")
+    with _rcol:
+        use_log_avg = st.checkbox("Log: avg", value=True, key="log_avg")
 
+    # ── Band Visibility ────────────────────────────────────────────────────────
     st.divider()
-    st.subheader("Avg Band Price")
-    use_log_avg = st.checkbox("Logarithmic scale", value=True, key="log_avg")
-
-    st.divider()
-    st.subheader("Band Frequency Chart")
+    st.subheader("Band Visibility")
     _band_opts = [_band_label(b, currency) for b in STORAGE_BANDS]
-    _freq_sel = st.multiselect(
+    _band_sel = st.multiselect(
         "Visible bands", _band_opts, default=_band_opts,
-        key=f"freq_bands_{currency}",
+        key=f"all_bands_{currency}",
+        help="Applies to Band Frequency, Avg Price, and Distribution charts.",
     )
-    freq_band_ids = [b.id for b in STORAGE_BANDS if _band_label(b, currency) in _freq_sel]
+    band_ids_all = [b.id for b in STORAGE_BANDS if _band_label(b, currency) in _band_sel]
 
+    # ── Threshold / Distribution ────────────────────────────────────────────────
     st.divider()
-    st.subheader("Avg Band Price Chart")
-    _avg_sel = st.multiselect(
-        "Visible bands", _band_opts, default=_band_opts,
-        key=f"avg_bands_{currency}",
-    )
-    avg_band_ids = [b.id for b in STORAGE_BANDS if _band_label(b, currency) in _avg_sel]
-
-    st.divider()
-    st.subheader("Price Threshold / Distribution")
+    st.subheader("Threshold Chart")
     threshold_mode = st.radio(
-        "Chart type", ["Price Threshold", "Band Distribution"], key="thr_mode"
+        "Chart type", ["Price Threshold", "Band Distribution"],
+        key="thr_mode", horizontal=True, label_visibility="collapsed",
     )
     if threshold_mode == "Price Threshold":
         threshold = float(st.number_input(
             f"Threshold ({currency}/MWh)", value=150, step=50, min_value=-1000, max_value=20000
         ))
-        dist_band_ids: list[str] = []
     else:
         threshold = 0.0
-        _dist_sel = st.multiselect(
-            "Visible bands", _band_opts, default=_band_opts,
-            key=f"dist_bands_{currency}",
-        )
-        dist_band_ids = [b.id for b in STORAGE_BANDS if _band_label(b, currency) in _dist_sel]
+
+# ── Guard: require at least one region ────────────────────────────────────────
 
 if not region_names:
-    st.warning("Select at least one region in the sidebar to continue.")
+    st.title("⚡ Electricity Price Band Analyser")
+    st.info(
+        "Select one or more markets and regions in the sidebar to load price data. "
+        "You can compare across Australia (NEM), US ISOs, and European countries simultaneously."
+    )
     st.stop()
 
-# ── Main content ───────────────────────────────────────────────────────────────
+# ── Page header ───────────────────────────────────────────────────────────────
 
-st.title("Price Band Analyser")
+st.title("⚡ Electricity Price Band Analyser")
 
 _source_map = {
     "australia": "Open Electricity API",
-    "usa": "gridstatus / ISO public data",
-    "europe": "ENTSO-E Transparency Platform",
+    "usa":       "gridstatus / ISO public data",
+    "europe":    "ENTSO-E Transparency Platform",
 }
 _markets_in_sel = {ALL_REGIONS[r]["market"] for r in region_names}
 _sources = " · ".join(_source_map[m] for m in ["australia", "usa", "europe"] if m in _markets_in_sel)
-st.caption(
-    f"{_sources} · 1-hour intervals · "
-    f"{date_start:%d %b %Y} – {date_end:%d %b %Y} · "
-    f"{', '.join(region_names)}"
-)
+
+col_title_l, col_title_r = st.columns([3, 1])
+with col_title_l:
+    st.caption(f"{', '.join(region_names)}")
+with col_title_r:
+    st.caption(f"{date_start:%d %b %Y} – {date_end:%d %b %Y}  |  {_sources}", unsafe_allow_html=False)
 
 st.divider()
 
@@ -994,18 +993,26 @@ trace_labels: "dict[str, str] | None" = None
 if len(currencies) > 1:
     trace_labels = {r: f"{r} {_mkt_suffix[ALL_REGIONS[r]['market']]}" for r in all_prices}
 
-# ── Summary metrics ────────────────────────────────────────────────────────────
+# Tab labels for multi-region sections
+_tab_labels = (
+    [trace_labels[r] for r in all_prices] if trace_labels
+    else list(all_prices.keys())
+)
 
-metric_cols = st.columns(len(all_prices))
-for col, (rname, prices) in zip(metric_cols, all_prices.items()):
+# ── Overview: metrics + band tables ───────────────────────────────────────────
+
+st.subheader("📊 Overview")
+
+ov_cols = st.columns(len(all_prices))
+for col, (rname, prices) in zip(ov_cols, all_prices.items()):
     with col:
         avg_price = prices.mean()
         neg_pct   = (prices < 0).mean() * 100
-        high_pct  = (prices >= 300).mean() * 100
+        peak_pct  = (prices >= 100).mean() * 100  # B6+ threshold — meaningful for BESS dispatch
 
         avg_color  = "#16a34a" if avg_price < 0 else "#2563eb"
         neg_color  = "#16a34a" if neg_pct > 5 else "#6b7280"
-        high_color = "#dc2626" if high_pct > 10 else "#6b7280"
+        peak_color = "#dc2626" if peak_pct > 5 else "#6b7280"
 
         r_currency = ALL_REGIONS[rname]["currency"]
         avg_str = (
@@ -1018,26 +1025,17 @@ for col, (rname, prices) in zip(metric_cols, all_prices.items()):
         with mc1:
             st.html(_metric_card("Avg Price", f"{avg_str}/MWh", avg_color))
         with mc2:
-            st.html(_metric_card("Negative", f"{neg_pct:.1f}%", neg_color))
+            st.html(_metric_card("Negative hrs", f"{neg_pct:.1f}%", neg_color))
         with mc3:
-            st.html(_metric_card(f"High ≥{r_currency}300", f"{high_pct:.1f}%", high_color))
+            st.html(_metric_card(f"Peak ≥{r_currency}100", f"{peak_pct:.1f}%", peak_color))
+
+        render_band_table(compute_band_stats(prices), r_currency)
 
 st.divider()
 
-# ── Band tables ────────────────────────────────────────────────────────────────
+# ── Spot Price ─────────────────────────────────────────────────────────────────
 
-st.subheader("Band Distribution")
-table_cols = st.columns(len(all_prices))
-for col, (rname, prices) in zip(table_cols, all_prices.items()):
-    with col:
-        _region_pill(rname, color_map, ALL_REGIONS[rname]["price_type"])
-        render_band_table(compute_band_stats(prices), ALL_REGIONS[rname]["currency"])
-
-st.divider()
-
-# ── Spot price chart ───────────────────────────────────────────────────────────
-
-st.subheader("Spot Price")
+st.subheader("📈 Spot Price")
 render_spot_price_chart(
     all_prices, chart_freq, use_log_spot, color_map, currency,
     trace_labels=trace_labels,
@@ -1045,67 +1043,87 @@ render_spot_price_chart(
 
 st.divider()
 
-# ── Price Band Trends ──────────────────────────────────────────────────────────
+# ── Band Trends ────────────────────────────────────────────────────────────────
 
-st.subheader("Price Band Trends Over Time")
+st.subheader("🎯 Band Trends")
 
-for rname, prices in all_prices.items():
-    _region_pill(rname, color_map, ALL_REGIONS[rname]["price_type"])
+def _render_band_trends(rname: str, prices: pd.Series) -> None:
     freq_df, avg_df, last_date = compute_timeseries(prices, chart_freq)
     if freq_df.empty:
-        st.info(f"Not enough data for {rname} at this interval.")
-        continue
+        st.info("Not enough data at this interval — try a coarser X-axis setting.")
+        return
     r_currency = ALL_REGIONS[rname]["currency"]
     cl, cr = st.columns(2)
     with cl:
-        st.caption("Band Frequency — % of hours in each band per period")
+        st.caption("Band Frequency — % of hours in each price band per period")
         render_frequency_chart(
-            freq_df, last_date, band_ids=freq_band_ids,
+            freq_df, last_date, band_ids=band_ids_all,
             currency=r_currency, chart_freq=chart_freq,
         )
     with cr:
-        st.caption(f"Average Band Price — avg {r_currency}/MWh within each band per period")
+        st.caption(f"Avg Band Price — mean {r_currency}/MWh within each band per period")
         render_avg_price_chart(
             avg_df, last_date, use_log_avg, r_currency,
-            band_ids=avg_band_ids, chart_freq=chart_freq,
+            band_ids=band_ids_all, chart_freq=chart_freq,
         )
+
+if len(all_prices) > 1:
+    trend_tabs = st.tabs(_tab_labels)
+    for tab, rname in zip(trend_tabs, all_prices.keys()):
+        with tab:
+            _region_pill(rname, color_map, ALL_REGIONS[rname]["price_type"])
+            _render_band_trends(rname, all_prices[rname])
+else:
+    rname = next(iter(all_prices))
+    _render_band_trends(rname, all_prices[rname])
 
 st.divider()
 
-# ── Above / Below Threshold ────────────────────────────────────────────────────
+# ── Price Threshold / Band Distribution ────────────────────────────────────────
 
 if threshold_mode == "Price Threshold":
-    st.subheader("Above / Below Price Threshold")
-    st.caption(f"Threshold set to {currency}{threshold:,.0f}/MWh — adjust in the sidebar")
+    st.subheader("⬆️ Price Threshold")
+    st.caption(f"% of hours above / below {currency}{threshold:,.0f}/MWh — adjust in sidebar")
 else:
-    st.subheader("Band Distribution Over Time")
+    st.subheader("📊 Band Distribution Over Time")
     st.caption("100% stacked area — share of hours in each price band per period")
 
-for rname, prices in all_prices.items():
-    _region_pill(rname, color_map, ALL_REGIONS[rname]["price_type"])
+def _render_threshold_section(rname: str, prices: pd.Series) -> None:
     r_currency = ALL_REGIONS[rname]["currency"]
     if threshold_mode == "Price Threshold":
         below_pct = float((prices < threshold).mean() * 100)
         st.html(_metric_card(
-            f"Avg below {r_currency}{threshold:,.0f}/MWh",
-            f"{below_pct:.1f}% of hours",
+            f"Hours below {r_currency}{threshold:,.0f}/MWh",
+            f"{below_pct:.1f}%",
             "#16a34a",
         ))
         thr_df, thr_last_date = compute_threshold_timeseries(prices, threshold, chart_freq)
         if thr_df.empty:
-            st.info(f"Not enough data for {rname} at this interval.")
+            st.info("Not enough data at this interval.")
         else:
             render_threshold_chart(thr_df, threshold, thr_last_date, r_currency, chart_freq=chart_freq)
     else:
         freq_df, _, last_date = compute_timeseries(prices, chart_freq)
         if freq_df.empty:
-            st.info(f"Not enough data for {rname} at this interval.")
+            st.info("Not enough data at this interval.")
         else:
-            render_band_distribution_chart(freq_df, last_date, dist_band_ids, r_currency, chart_freq=chart_freq)
+            render_band_distribution_chart(freq_df, last_date, band_ids_all, r_currency, chart_freq=chart_freq)
+
+if len(all_prices) > 1:
+    thr_tabs = st.tabs(_tab_labels)
+    for tab, rname in zip(thr_tabs, all_prices.keys()):
+        with tab:
+            _region_pill(rname, color_map, ALL_REGIONS[rname]["price_type"])
+            _render_threshold_section(rname, all_prices[rname])
+else:
+    rname = next(iter(all_prices))
+    _region_pill(rname, color_map, ALL_REGIONS[rname]["price_type"])
+    _render_threshold_section(rname, all_prices[rname])
+
+# ── Footer ─────────────────────────────────────────────────────────────────────
 
 _markets_used = {ALL_REGIONS[r]["market"] for r in all_prices}
 _source = " · ".join(_source_map[m] for m in ["australia", "usa", "europe"] if m in _markets_used)
 st.caption(
-    f"Source: {_source} · "
-    f"1-hour intervals · {date_start:%d %b %Y} – {date_end:%d %b %Y}"
+    f"Source: {_source} · 1-hour intervals · {date_start:%d %b %Y} – {date_end:%d %b %Y}"
 )
