@@ -54,6 +54,40 @@ US_COLORS: dict[str, str] = {
     "SPP":    "#b45309",
 }
 
+EU_COUNTRIES: dict[str, str] = {
+    "Germany/Lux": "DE_LU",
+    "France":      "FR",
+    "Spain":       "ES",
+    "Netherlands": "NL",
+    "Belgium":     "BE",
+    "Austria":     "AT",
+    "Italy":       "IT_NORD",
+    "Sweden":      "SE_3",
+    "Norway":      "NO_2",
+    "Denmark":     "DK_1",
+    "Finland":     "FI",
+    "Poland":      "PL",
+    "Portugal":    "PT",
+    "Czech Rep.":  "CZ",
+}
+
+EU_COLORS: dict[str, str] = {
+    "Germany/Lux": "#2563eb",
+    "France":      "#dc2626",
+    "Spain":       "#d97706",
+    "Netherlands": "#059669",
+    "Belgium":     "#7c3aed",
+    "Austria":     "#0891b2",
+    "Italy":       "#16a34a",
+    "Sweden":      "#1d4ed8",
+    "Norway":      "#9333ea",
+    "Denmark":     "#ef4444",
+    "Finland":     "#0ea5e9",
+    "Poland":      "#b45309",
+    "Portugal":    "#10b981",
+    "Czech Rep.":  "#f59e0b",
+}
+
 _today = date.today()
 
 PRESETS: dict[str, tuple[date, date]] = {
@@ -68,6 +102,7 @@ PRESETS: dict[str, tuple[date, date]] = {
 
 INTERVAL_MINUTES = 60
 CHUNK_DAYS = 30
+CHUNK_DAYS_EU = 90
 
 CHART_FREQS: dict[str, str] = {
     "1 Week":    "W",
@@ -249,6 +284,63 @@ def fetch_prices_gridstatus(iso_key: str, date_start: date, date_end: date) -> p
 
     combined = pd.concat([results[i] for i in range(len(chunks))])
     combined = combined[~combined.index.duplicated(keep="first")].sort_index()
+    return combined
+
+
+# ── Data fetching — Europe ────────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_prices_entsoe(area_code: str, date_start: date, date_end: date) -> pd.Series:
+    """Fetch hourly day-ahead prices for a European bidding zone via ENTSO-E."""
+    from entsoe import EntsoePandasClient
+
+    api_key = os.environ.get("ENTSOE_API_KEY", "")
+    if not api_key:
+        raise ValueError(
+            "ENTSO-E API key missing. Add ENTSOE_API_KEY to your .env file. "
+            "Register at transparency.entsoe.eu → My Account Settings → Web API Security Token."
+        )
+
+    client = EntsoePandasClient(api_key=api_key)
+
+    chunks: list[tuple[date, date]] = []
+    cursor = date_start
+    while cursor <= date_end:
+        chunk_end = min(cursor + timedelta(days=CHUNK_DAYS_EU - 1), date_end)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+
+    progress = st.progress(0, text=f"Fetching {area_code}… (0 / {len(chunks)} chunks)")
+    series_list: list[pd.Series] = []
+
+    for i, (cs, ce) in enumerate(chunks):
+        start_ts = pd.Timestamp(cs, tz="UTC")
+        end_ts   = pd.Timestamp(ce + timedelta(days=1), tz="UTC")
+        for attempt in range(3):
+            try:
+                s = client.query_day_ahead_prices(area_code, start=start_ts, end=end_ts)
+                series_list.append(s)
+                break
+            except Exception as exc:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    raise
+        progress.progress(
+            (i + 1) / len(chunks),
+            text=f"Fetching {area_code}… ({i + 1} / {len(chunks)} chunks)",
+        )
+
+    progress.empty()
+
+    if not series_list:
+        return pd.Series(dtype=float)
+
+    combined = pd.concat(series_list)
+    combined = combined[~combined.index.duplicated(keep="first")].sort_index()
+    combined = combined.resample("1h").mean().dropna()
+    if combined.index.tz is not None:
+        combined.index = combined.index.tz_convert("UTC").tz_localize(None)
     return combined
 
 
@@ -630,24 +722,33 @@ st.markdown(_CSS, unsafe_allow_html=True)
 with st.sidebar:
     st.header("⚡ Price Band Analyser")
 
-    market = st.radio("Market", ["Australia 🇦🇺", "USA 🇺🇸"], horizontal=True)
+    market = st.radio("Market", ["Australia 🇦🇺", "USA 🇺🇸", "Europe 🇪🇺"], horizontal=True)
     is_australia = market.startswith("Australia")
+    is_usa       = market.startswith("USA")
+    is_europe    = market.startswith("Europe")
 
     st.subheader("Data")
     if is_australia:
         region_names: list[str] = st.multiselect(
             "Regions", list(REGIONS.keys()), default=["NSW"]
         )
-        currency = "$"
-        color_map = REGION_COLORS
+        currency   = "$"
+        color_map  = REGION_COLORS
         data_label = "NEM · Real-time spot price"
-    else:
+    elif is_usa:
         region_names = st.multiselect(
             "ISOs", list(US_ISOS.keys()), default=["CAISO"]
         )
-        currency = "$"
-        color_map = US_COLORS
+        currency   = "$"
+        color_map  = US_COLORS
         data_label = "Real-time hourly LMP"
+    else:  # Europe
+        region_names = st.multiselect(
+            "Countries", list(EU_COUNTRIES.keys()), default=["Germany/Lux"]
+        )
+        currency   = "€"
+        color_map  = EU_COLORS
+        data_label = "Day-ahead hourly prices · ENTSO-E"
 
     preset = st.selectbox("Timeframe", list(PRESETS.keys()), index=3)
 
@@ -671,14 +772,14 @@ with st.sidebar:
     st.subheader("Avg Band Price")
     use_log_avg = st.checkbox("Logarithmic scale", value=True, key="log_avg")
     if not use_log_avg:
-        y_cap = float(st.number_input("Cap Y-axis ($/MWh)", value=2000, step=500, min_value=100, key="y_cap"))
+        y_cap = float(st.number_input(f"Cap Y-axis ({currency}/MWh)", value=2000, step=500, min_value=100, key="y_cap"))
     else:
         y_cap = None
 
     st.divider()
     st.subheader("Price Threshold")
     threshold = float(st.number_input(
-        "Threshold ($/MWh)", value=150, step=50, min_value=-1000, max_value=20000
+        f"Threshold ({currency}/MWh)", value=150, step=50, min_value=-1000, max_value=20000
     ))
 
 if not region_names:
@@ -703,8 +804,10 @@ for rname in region_names:
     try:
         if is_australia:
             p = fetch_prices(REGIONS[rname], date_start, date_end)
-        else:
+        elif is_usa:
             p = fetch_prices_gridstatus(rname, date_start, date_end)
+        else:  # Europe
+            p = fetch_prices_entsoe(EU_COUNTRIES[rname], date_start, date_end)
 
         if p.empty:
             st.warning(f"No data returned for {rname}.")
@@ -718,6 +821,13 @@ for rname in region_names:
                 "ERCOT requires a free API key. Register at https://apiexplorer.ercot.com → "
                 "Products → Public API → Subscribe, then add ERCOT_API_KEY to your .env file."
             )
+        elif "ENTSOE_API_KEY" in msg or "Web API Security Token" in msg:
+            st.error(msg)
+        elif "401" in msg and is_europe:
+            st.error(
+                f"ENTSO-E API key rejected (401) for {rname}. "
+                "Check ENTSOE_API_KEY in your .env file."
+            )
         elif "not found" in msg.lower() or "hub" in msg.lower():
             st.error(f"{rname}: {msg}")
         elif "403" in msg:
@@ -725,7 +835,6 @@ for rname in region_names:
                 f"API key rejected for {rname} (403). Check your credentials in .env."
             )
         else:
-            # Include the exception type so blank-message errors are still identifiable
             err_detail = msg or f"({type(exc).__name__} — no message)"
             st.error(f"Error fetching {rname}: {err_detail}")
 
@@ -754,7 +863,7 @@ for col, (rname, prices) in zip(metric_cols, all_prices.items()):
         with mc2:
             st.html(_metric_card("Negative", f"{neg_pct:.1f}%", neg_color))
         with mc3:
-            st.html(_metric_card("High ≥$300", f"{high_pct:.1f}%", high_color))
+            st.html(_metric_card(f"High ≥{currency}300", f"{high_pct:.1f}%", high_color))
 
 st.divider()
 
@@ -823,7 +932,12 @@ for rname, prices in all_prices.items():
     else:
         render_threshold_chart(thr_df, threshold, thr_last_date, currency)
 
+_source = (
+    "Open Electricity API" if is_australia
+    else "gridstatus / ISO public data" if is_usa
+    else "ENTSO-E Transparency Platform"
+)
 st.caption(
-    f"Source: {'Open Electricity API' if is_australia else 'gridstatus / ISO public data'} · "
+    f"Source: {_source} · "
     f"1-hour intervals · {date_start:%d %b %Y} – {date_end:%d %b %Y}"
 )
